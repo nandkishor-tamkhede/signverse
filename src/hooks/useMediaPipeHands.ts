@@ -1,22 +1,50 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { Hands, Results } from '@mediapipe/hands';
-import { Camera } from '@mediapipe/camera_utils';
-import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
-import { HAND_CONNECTIONS } from '@mediapipe/hands';
 import { HandLandmarks, GestureClassificationResult } from '@/types/gesture';
 import { classifyGesture } from '@/lib/gestures';
 import { useCameraPermission, CameraPermissionState } from './useCameraPermission';
+import '@/types/mediapipe.d.ts';
 
 interface UseMediaPipeHandsOptions {
   onGestureDetected: (result: GestureClassificationResult) => void;
   isActive: boolean;
 }
 
+// Check if MediaPipe is loaded from CDN
+function isMediaPipeLoaded(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.Hands !== 'undefined' &&
+    typeof window.Camera !== 'undefined' &&
+    typeof window.drawConnectors !== 'undefined' &&
+    typeof window.drawLandmarks !== 'undefined'
+  );
+}
+
+// Wait for MediaPipe to load
+async function waitForMediaPipe(timeout = 10000): Promise<boolean> {
+  const startTime = Date.now();
+  
+  return new Promise((resolve) => {
+    const check = () => {
+      if (isMediaPipeLoaded()) {
+        console.log('[MediaPipe] Libraries loaded successfully');
+        resolve(true);
+      } else if (Date.now() - startTime > timeout) {
+        console.error('[MediaPipe] Timeout waiting for libraries to load');
+        resolve(false);
+      } else {
+        setTimeout(check, 100);
+      }
+    };
+    check();
+  });
+}
+
 export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeHandsOptions) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const handsRef = useRef<Hands | null>(null);
-  const cameraRef = useRef<Camera | null>(null);
+  const handsRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,7 +52,17 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
 
   const { permissionState, errorMessage, requestPermission } = useCameraPermission();
 
-  const onResults = useCallback((results: Results) => {
+  // Hand connections for drawing
+  const HAND_CONNECTIONS_LOCAL = [
+    [0, 1], [1, 2], [2, 3], [3, 4],           // thumb
+    [0, 5], [5, 6], [6, 7], [7, 8],           // index
+    [0, 9], [9, 10], [10, 11], [11, 12],      // middle
+    [0, 13], [13, 14], [14, 15], [15, 16],    // ring
+    [0, 17], [17, 18], [18, 19], [19, 20],    // pinky
+    [5, 9], [9, 13], [13, 17]                  // palm
+  ];
+
+  const onResults = useCallback((results: any) => {
     if (!canvasRef.current) return;
     
     const canvas = canvasRef.current;
@@ -49,28 +87,52 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       for (const landmarks of results.multiHandLandmarks) {
         // Mirror the landmarks for drawing
-        const mirroredLandmarks = landmarks.map(lm => ({
+        const mirroredLandmarks = landmarks.map((lm: any) => ({
           x: 1 - lm.x,
           y: lm.y,
           z: lm.z
         }));
 
-        // Draw connections with gradient
-        drawConnectors(ctx, mirroredLandmarks, HAND_CONNECTIONS, {
-          color: 'rgba(0, 200, 255, 0.6)',
-          lineWidth: 3
-        });
+        // Try to use global drawConnectors/drawLandmarks if available
+        if (window.drawConnectors && window.HAND_CONNECTIONS) {
+          window.drawConnectors(ctx, mirroredLandmarks, window.HAND_CONNECTIONS, {
+            color: 'rgba(0, 200, 255, 0.6)',
+            lineWidth: 3
+          });
+        } else {
+          // Fallback: draw connections manually
+          ctx.strokeStyle = 'rgba(0, 200, 255, 0.6)';
+          ctx.lineWidth = 3;
+          for (const [i, j] of HAND_CONNECTIONS_LOCAL) {
+            ctx.beginPath();
+            ctx.moveTo(mirroredLandmarks[i].x * canvas.width, mirroredLandmarks[i].y * canvas.height);
+            ctx.lineTo(mirroredLandmarks[j].x * canvas.width, mirroredLandmarks[j].y * canvas.height);
+            ctx.stroke();
+          }
+        }
         
-        // Draw landmarks with glow effect
-        drawLandmarks(ctx, mirroredLandmarks, {
-          color: '#00d4ff',
-          fillColor: 'rgba(180, 80, 255, 0.8)',
-          lineWidth: 2,
-          radius: 5
-        });
+        if (window.drawLandmarks) {
+          window.drawLandmarks(ctx, mirroredLandmarks, {
+            color: '#00d4ff',
+            fillColor: 'rgba(180, 80, 255, 0.8)',
+            lineWidth: 2,
+            radius: 5
+          });
+        } else {
+          // Fallback: draw landmarks manually
+          for (const lm of mirroredLandmarks) {
+            ctx.beginPath();
+            ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
+            ctx.fillStyle = 'rgba(180, 80, 255, 0.8)';
+            ctx.fill();
+            ctx.strokeStyle = '#00d4ff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+        }
 
         // Classify gesture using original landmarks
-        const handLandmarks: HandLandmarks[] = landmarks.map(lm => ({
+        const handLandmarks: HandLandmarks[] = landmarks.map((lm: any) => ({
           x: lm.x,
           y: lm.y,
           z: lm.z
@@ -82,7 +144,7 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
     } else {
       onGestureDetected({ gesture: null, confidence: 0 });
     }
-  }, [onGestureDetected]);
+  }, [onGestureDetected, HAND_CONNECTIONS_LOCAL]);
 
   const stopCamera = useCallback(() => {
     console.log('[Camera] Stopping camera...');
@@ -132,6 +194,26 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
       setError(null);
 
       console.log('[Camera] Starting camera initialization...');
+
+      // Check for secure context (HTTPS)
+      if (typeof window !== 'undefined' && !window.isSecureContext) {
+        if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+          throw new Error('Camera access requires HTTPS. Please access this site over a secure connection.');
+        }
+      }
+
+      // Wait for MediaPipe to load
+      console.log('[MediaPipe] Waiting for libraries to load...');
+      const loaded = await waitForMediaPipe();
+      if (!loaded) {
+        throw new Error('Failed to load MediaPipe libraries. Please refresh the page.');
+      }
+
+      // Verify Hands constructor exists
+      if (typeof window.Hands !== 'function') {
+        console.error('[MediaPipe] window.Hands is:', typeof window.Hands);
+        throw new Error('MediaPipe Hands not available. Please refresh the page.');
+      }
 
       // Request permission first
       const hasPermission = await requestPermission();
@@ -190,11 +272,11 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
         });
       });
 
-      console.log('[Camera] Initializing MediaPipe Hands...');
+      console.log('[MediaPipe] Initializing Hands with CDN constructor...');
 
-      // Initialize MediaPipe Hands
-      const hands = new Hands({
-        locateFile: (file) => {
+      // Initialize MediaPipe Hands using global constructor from CDN
+      const hands = new window.Hands({
+        locateFile: (file: string) => {
           return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
         }
       });
@@ -211,8 +293,8 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
 
       console.log('[Camera] Starting MediaPipe camera...');
 
-      // Start camera
-      const camera = new Camera(videoRef.current, {
+      // Start camera using global Camera constructor from CDN
+      const camera = new window.Camera(videoRef.current, {
         onFrame: async () => {
           if (handsRef.current && videoRef.current && videoRef.current.readyState >= 2) {
             try {
