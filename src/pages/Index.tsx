@@ -80,7 +80,7 @@ const Index = () => {
   }, [speak]);
 
   // MediaPipe hands hook
-  const { videoRef, canvasRef, isLoading, error } = useMediaPipeHands({
+  const { videoRef, canvasRef, isLoading, error, permissionState } = useMediaPipeHands({
     onGestureDetected: handleGestureDetected,
     isActive: isCameraActive
   });
@@ -116,6 +116,7 @@ const Index = () => {
               isActive={isCameraActive}
               isLoading={isLoading}
               error={error}
+              permissionState={permissionState}
             />
 
             <GestureDisplay

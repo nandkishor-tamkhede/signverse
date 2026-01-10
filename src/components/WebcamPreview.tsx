@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion';
-import { Camera, CameraOff, Loader2 } from 'lucide-react';
+import { Camera, CameraOff, Loader2, ShieldAlert, MonitorX, Lock, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { RefObject } from 'react';
+import { CameraPermissionState } from '@/hooks/useCameraPermission';
 
 interface WebcamPreviewProps {
   videoRef: RefObject<HTMLVideoElement>;
@@ -9,9 +10,100 @@ interface WebcamPreviewProps {
   isActive: boolean;
   isLoading: boolean;
   error: string | null;
+  permissionState?: CameraPermissionState;
 }
 
-export function WebcamPreview({ videoRef, canvasRef, isActive, isLoading, error }: WebcamPreviewProps) {
+const getErrorIcon = (permissionState?: CameraPermissionState) => {
+  switch (permissionState) {
+    case 'denied':
+      return <ShieldAlert className="w-16 h-16 text-destructive mb-4" />;
+    case 'not-found':
+      return <MonitorX className="w-16 h-16 text-destructive mb-4" />;
+    case 'insecure':
+      return <Lock className="w-16 h-16 text-destructive mb-4" />;
+    case 'unsupported':
+      return <AlertTriangle className="w-16 h-16 text-destructive mb-4" />;
+    case 'in-use':
+      return <CameraOff className="w-16 h-16 text-destructive mb-4" />;
+    default:
+      return <CameraOff className="w-16 h-16 text-destructive mb-4" />;
+  }
+};
+
+const getPermissionInstructions = (permissionState?: CameraPermissionState) => {
+  switch (permissionState) {
+    case 'denied':
+      return (
+        <div className="mt-4 text-left text-sm text-muted-foreground space-y-2 max-w-md">
+          <p className="font-medium text-foreground">How to enable camera:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Click the camera/lock icon in your browser's address bar</li>
+            <li>Select "Allow" for camera access</li>
+            <li>Refresh this page</li>
+          </ul>
+          <p className="text-xs mt-3 opacity-75">
+            Or go to browser Settings → Privacy & Security → Site Settings → Camera
+          </p>
+        </div>
+      );
+    case 'not-found':
+      return (
+        <div className="mt-4 text-left text-sm text-muted-foreground space-y-2 max-w-md">
+          <p className="font-medium text-foreground">Troubleshooting:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Connect a webcam to your device</li>
+            <li>Check if your camera is enabled in system settings</li>
+            <li>Try a different USB port</li>
+            <li>Restart your browser</li>
+          </ul>
+        </div>
+      );
+    case 'in-use':
+      return (
+        <div className="mt-4 text-left text-sm text-muted-foreground space-y-2 max-w-md">
+          <p className="font-medium text-foreground">Camera is busy:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Close other apps using the camera (Zoom, Teams, etc.)</li>
+            <li>Close other browser tabs with camera access</li>
+            <li>Restart your browser</li>
+          </ul>
+        </div>
+      );
+    case 'insecure':
+      return (
+        <div className="mt-4 text-left text-sm text-muted-foreground space-y-2 max-w-md">
+          <p className="font-medium text-foreground">Secure connection required:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Camera access requires HTTPS</li>
+            <li>Please access this site via https://</li>
+            <li>Or use localhost for development</li>
+          </ul>
+        </div>
+      );
+    case 'unsupported':
+      return (
+        <div className="mt-4 text-left text-sm text-muted-foreground space-y-2 max-w-md">
+          <p className="font-medium text-foreground">Browser not supported:</p>
+          <ul className="list-disc list-inside space-y-1">
+            <li>Use Chrome, Edge, Firefox, or Safari</li>
+            <li>Update your browser to the latest version</li>
+            <li>Enable JavaScript if disabled</li>
+          </ul>
+        </div>
+      );
+    default:
+      return null;
+  }
+};
+
+export function WebcamPreview({ 
+  videoRef, 
+  canvasRef, 
+  isActive, 
+  isLoading, 
+  error,
+  permissionState 
+}: WebcamPreviewProps) {
   return (
     <motion.div 
       className="relative w-full aspect-video rounded-2xl overflow-hidden glass-card"
@@ -30,6 +122,7 @@ export function WebcamPreview({ videoRef, canvasRef, isActive, isLoading, error 
         className="hidden"
         playsInline
         muted
+        autoPlay
       />
 
       {/* Canvas for drawing */}
@@ -39,12 +132,12 @@ export function WebcamPreview({ videoRef, canvasRef, isActive, isLoading, error 
         height={480}
         className={cn(
           'relative z-10 w-full h-full object-cover rounded-2xl',
-          !isActive && 'opacity-0'
+          (!isActive || isLoading || error) && 'opacity-0'
         )}
       />
 
       {/* Overlay states */}
-      {!isActive && (
+      {!isActive && !error && (
         <motion.div 
           className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-card/80 backdrop-blur-sm rounded-2xl"
           initial={{ opacity: 0 }}
@@ -52,38 +145,43 @@ export function WebcamPreview({ videoRef, canvasRef, isActive, isLoading, error 
         >
           <CameraOff className="w-16 h-16 text-muted-foreground mb-4" />
           <p className="text-muted-foreground text-lg">Camera is off</p>
-          <p className="text-muted-foreground text-sm mt-2">Click "Start Camera" to begin</p>
+          <p className="text-muted-foreground text-sm mt-2">Click "Start" to begin</p>
         </motion.div>
       )}
 
-      {isActive && isLoading && (
+      {isActive && isLoading && !error && (
         <motion.div 
           className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-card/80 backdrop-blur-sm rounded-2xl"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
         >
           <Loader2 className="w-16 h-16 text-primary animate-spin mb-4" />
-          <p className="text-foreground text-lg font-medium">Initializing AI...</p>
-          <p className="text-muted-foreground text-sm mt-2">Loading hand detection model</p>
+          <p className="text-foreground text-lg font-medium">Initializing Camera...</p>
+          <p className="text-muted-foreground text-sm mt-2">
+            {permissionState === 'requesting' 
+              ? 'Please allow camera access when prompted' 
+              : 'Loading hand detection model'}
+          </p>
         </motion.div>
       )}
 
       {error && (
         <motion.div 
-          className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-destructive/10 backdrop-blur-sm rounded-2xl p-6"
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-destructive/5 backdrop-blur-sm rounded-2xl p-6"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
         >
-          <CameraOff className="w-16 h-16 text-destructive mb-4" />
-          <p className="text-destructive text-lg font-medium text-center">{error}</p>
+          {getErrorIcon(permissionState)}
+          <p className="text-destructive text-lg font-medium text-center max-w-md">{error}</p>
+          {getPermissionInstructions(permissionState)}
         </motion.div>
       )}
 
       {/* Corner decorations */}
-      <div className="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-primary rounded-tl-lg z-30" />
-      <div className="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-primary rounded-tr-lg z-30" />
-      <div className="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-primary rounded-bl-lg z-30" />
-      <div className="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-primary rounded-br-lg z-30" />
+      <div className="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-primary rounded-tl-lg z-30 pointer-events-none" />
+      <div className="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-primary rounded-tr-lg z-30 pointer-events-none" />
+      <div className="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-primary rounded-bl-lg z-30 pointer-events-none" />
+      <div className="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-primary rounded-br-lg z-30 pointer-events-none" />
 
       {/* Live indicator */}
       {isActive && !isLoading && !error && (
