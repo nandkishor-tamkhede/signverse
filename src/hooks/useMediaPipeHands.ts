@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { HandLandmarks, GestureClassificationResult } from '@/types/gesture';
 import { classifyGesture } from '@/lib/gestures';
 import { useCameraPermission } from './useCameraPermission';
-import '@/types/mediapipe.d.ts';
 
 interface UseMediaPipeHandsOptions {
   onGestureDetected: (result: GestureClassificationResult) => void;
