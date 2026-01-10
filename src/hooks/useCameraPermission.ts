@@ -1,31 +1,39 @@
 import { useState, useEffect, useCallback } from 'react';
 
-export type CameraPermissionState = 
+export type CameraPermissionState =
   | 'idle'
-  | 'requesting' 
-  | 'granted' 
-  | 'denied' 
-  | 'not-found' 
-  | 'in-use' 
-  | 'unsupported' 
+  | 'requesting'
+  | 'granted'
+  | 'denied'
+  | 'not-found'
+  | 'in-use'
+  | 'unsupported'
   | 'insecure';
 
 interface UseCameraPermissionReturn {
   permissionState: CameraPermissionState;
   errorMessage: string | null;
-  requestPermission: () => Promise<boolean>;
+  /**
+   * Explicitly requests camera access from the browser.
+   * Returns a live MediaStream when granted, otherwise null.
+   */
+  requestPermission: (videoConstraints?: MediaTrackConstraints) => Promise<MediaStream | null>;
   checkPermission: () => Promise<void>;
 }
 
 const ERROR_MESSAGES: Record<CameraPermissionState, string | null> = {
-  'idle': null,
-  'requesting': null,
-  'granted': null,
-  'denied': 'Camera access denied. Please enable camera permissions in your browser settings and refresh the page.',
+  idle: null,
+  requesting: null,
+  granted: null,
+  denied:
+    'Camera access denied. Please enable camera permissions in your browser settings and refresh the page.',
   'not-found': 'No camera found. Please connect a camera to your device.',
-  'in-use': 'Camera is in use by another application. Please close other apps using the camera.',
-  'unsupported': 'Your browser does not support camera access. Please use Chrome, Edge, Firefox, or Safari.',
-  'insecure': 'Camera access requires a secure connection (HTTPS). Please access this site over HTTPS.'
+  'in-use':
+    'Camera is in use by another application. Please close other apps using the camera.',
+  unsupported:
+    'Your browser does not support camera access. Please use Chrome, Edge, Firefox, or Safari.',
+  insecure:
+    'Camera access requires a secure connection (HTTPS). Please access this site over HTTPS.',
 };
 
 export function useCameraPermission(): UseCameraPermissionReturn {
@@ -37,9 +45,12 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     // Check for secure context (HTTPS)
     if (typeof window !== 'undefined' && !window.isSecureContext) {
       // Allow localhost for development
-      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      if (
+        window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1'
+      ) {
         setPermissionState('insecure');
-        setErrorMessage(ERROR_MESSAGES['insecure']);
+        setErrorMessage(ERROR_MESSAGES.insecure);
         console.error('[Camera] Site is not served over HTTPS');
         return false;
       }
@@ -48,7 +59,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     // Check for MediaDevices API
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setPermissionState('unsupported');
-      setErrorMessage(ERROR_MESSAGES['unsupported']);
+      setErrorMessage(ERROR_MESSAGES.unsupported);
       console.error('[Camera] MediaDevices API not supported');
       return false;
     }
@@ -63,7 +74,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
 
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
       setPermissionState('denied');
-      setErrorMessage(ERROR_MESSAGES['denied']);
+      setErrorMessage(ERROR_MESSAGES.denied);
     } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
       setPermissionState('not-found');
       setErrorMessage(ERROR_MESSAGES['not-found']);
@@ -75,8 +86,9 @@ export function useCameraPermission(): UseCameraPermissionReturn {
       setErrorMessage('Camera does not meet the required constraints.');
     } else if (err.name === 'TypeError') {
       setPermissionState('unsupported');
-      setErrorMessage(ERROR_MESSAGES['unsupported']);
+      setErrorMessage(ERROR_MESSAGES.unsupported);
     } else {
+      // Default to denied to ensure user sees actionable guidance
       setPermissionState('denied');
       setErrorMessage(`Camera error: ${err.message || 'Unknown error occurred'}`);
     }
@@ -87,10 +99,12 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     if (!checkBrowserSupport()) return;
 
     try {
-      // Use Permissions API if available
+      // Use Permissions API if available (not supported everywhere)
       if (navigator.permissions && navigator.permissions.query) {
-        const result = await navigator.permissions.query({ name: 'camera' as PermissionName });
-        
+        const result = await navigator.permissions.query({
+          name: 'camera' as PermissionName,
+        });
+
         switch (result.state) {
           case 'granted':
             setPermissionState('granted');
@@ -98,7 +112,7 @@ export function useCameraPermission(): UseCameraPermissionReturn {
             break;
           case 'denied':
             setPermissionState('denied');
-            setErrorMessage(ERROR_MESSAGES['denied']);
+            setErrorMessage(ERROR_MESSAGES.denied);
             break;
           case 'prompt':
           default:
@@ -113,49 +127,49 @@ export function useCameraPermission(): UseCameraPermissionReturn {
             setErrorMessage(null);
           } else if (result.state === 'denied') {
             setPermissionState('denied');
-            setErrorMessage(ERROR_MESSAGES['denied']);
+            setErrorMessage(ERROR_MESSAGES.denied);
           }
         });
       }
-    } catch (error) {
-      // Permissions API not supported, will check on request
+    } catch {
       console.log('[Camera] Permissions API not available, will check on request');
     }
   }, [checkBrowserSupport]);
 
-  // Request camera permission
-  const requestPermission = useCallback(async (): Promise<boolean> => {
-    if (!checkBrowserSupport()) return false;
+  // Request camera permission AND return a live stream when granted.
+  const requestPermission = useCallback(
+    async (videoConstraints?: MediaTrackConstraints): Promise<MediaStream | null> => {
+      if (!checkBrowserSupport()) return null;
 
-    setPermissionState('requesting');
-    setErrorMessage(null);
+      setPermissionState('requesting');
+      setErrorMessage(null);
 
-    try {
-      console.log('[Camera] Requesting camera access...');
-      
-      // Request camera access with constraints
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
+      try {
+        console.log('[Camera] Requesting camera access...');
+
+        const defaultConstraints: MediaTrackConstraints = {
           width: { ideal: 640 },
           height: { ideal: 480 },
-          facingMode: 'user'
-        },
-        audio: false
-      });
+          facingMode: 'user',
+        };
 
-      // Successfully got access - stop tracks immediately
-      stream.getTracks().forEach(track => track.stop());
-      
-      setPermissionState('granted');
-      setErrorMessage(null);
-      console.log('[Camera] Permission granted');
-      
-      return true;
-    } catch (error) {
-      handleError(error);
-      return false;
-    }
-  }, [checkBrowserSupport, handleError]);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { ...defaultConstraints, ...(videoConstraints ?? {}) },
+          audio: false,
+        });
+
+        setPermissionState('granted');
+        setErrorMessage(null);
+        console.log('[Camera] Permission granted');
+
+        return stream;
+      } catch (error) {
+        handleError(error);
+        return null;
+      }
+    },
+    [checkBrowserSupport, handleError]
+  );
 
   // Check permission on mount
   useEffect(() => {
@@ -166,6 +180,6 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     permissionState,
     errorMessage,
     requestPermission,
-    checkPermission
+    checkPermission,
   };
 }
