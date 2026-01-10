@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { HandLandmarks, GestureClassificationResult } from '@/types/gesture';
-import { classifyGesture } from '@/lib/gestures';
+import { classifyGesture, smoothGesture, resetSmoothing } from '@/lib/gestures';
 import { useCameraPermission } from './useCameraPermission';
 
 interface UseMediaPipeHandsOptions {
