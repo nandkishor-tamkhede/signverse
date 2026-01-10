@@ -116,22 +116,25 @@ export function WebcamPreview({
         <div className="absolute inset-[2px] rounded-2xl bg-card" />
       </div>
 
-      {/* Video element (hidden) */}
+      {/* Video element (visible so preview is stable even if model frames are delayed) */}
       <video
         ref={videoRef}
-        className="hidden"
+        className={cn(
+          'relative z-10 w-full h-full object-cover rounded-2xl',
+          (!isActive || error) && 'opacity-0'
+        )}
         playsInline
         muted
         autoPlay
       />
 
-      {/* Canvas for drawing */}
+      {/* Canvas for drawing (overlays landmarks/video when available) */}
       <canvas
         ref={canvasRef}
         width={640}
         height={480}
         className={cn(
-          'relative z-10 w-full h-full object-cover rounded-2xl',
+          'absolute inset-0 z-20 w-full h-full object-cover rounded-2xl pointer-events-none',
           (!isActive || isLoading || error) && 'opacity-0'
         )}
       />

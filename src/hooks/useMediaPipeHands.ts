@@ -76,10 +76,7 @@ async function waitForPageLoad(): Promise<void> {
 }
 
 async function waitForVideoReady(video: HTMLVideoElement, timeoutMs = 10000): Promise<void> {
-  if (video.readyState >= 2) {
-    // HAVE_CURRENT_DATA
-    return;
-  }
+  if (video.readyState >= 2) return; // HAVE_CURRENT_DATA
 
   await new Promise<void>((resolve, reject) => {
     const timeout = window.setTimeout(() => {
@@ -117,9 +114,15 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
   const streamRef = useRef<MediaStream | null>(null);
 
   const rafIdRef = useRef<number | null>(null);
+  const inFlightSendRef = useRef(false);
   const isStartingRef = useRef(false);
   const isProcessingRef = useRef(false);
-  const inFlightSendRef = useRef(false);
+
+  // Lifecycle token to cancel in-flight async starts (prevents double-init + wasm aborts).
+  const lifecycleRef = useRef(0);
+
+  // Keep a ref copy so start/stop doesn't recreate callbacks and retrigger effects.
+  const isInitializedRef = useRef(false);
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,11 +147,9 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Clear and draw video frame
+    // Clear and draw video frame (mirrored)
     ctx.save();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Mirror the video
     ctx.scale(-1, 1);
     ctx.translate(-canvas.width, 0);
 
@@ -158,9 +159,11 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
 
     ctx.restore();
 
-    // Draw hand landmarks
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-      for (const landmarks of results.multiHandLandmarks) {
+    const multi = Array.isArray(results.multiHandLandmarks) ? results.multiHandLandmarks : [];
+
+    if (multi.length > 0) {
+      // Draw all hands
+      for (const landmarks of multi) {
         const mirroredLandmarks = landmarks.map((lm: any) => ({
           x: 1 - lm.x,
           y: lm.y,
@@ -190,18 +193,13 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
             lineWidth: 2,
             radius: 5,
           });
-        } else {
-          for (const lm of mirroredLandmarks) {
-            ctx.beginPath();
-            ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
-            ctx.fillStyle = 'rgba(180, 80, 255, 0.8)';
-            ctx.fill();
-            ctx.strokeStyle = '#00d4ff';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-          }
         }
+      }
 
+      // Classify BOTH hands, but emit a single best result per frame
+      let best: GestureClassificationResult = { gesture: null, confidence: 0 };
+
+      for (const landmarks of multi) {
         const handLandmarks: HandLandmarks[] = landmarks.map((lm: any) => ({
           x: lm.x,
           y: lm.y,
@@ -209,8 +207,12 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
         }));
 
         const result = classifyGesture(handLandmarks);
-        onGestureDetectedRef.current(result);
+        if ((result.confidence ?? 0) > (best.confidence ?? 0)) {
+          best = result;
+        }
       }
+
+      onGestureDetectedRef.current(best);
     } else {
       onGestureDetectedRef.current({ gesture: null, confidence: 0 });
     }
@@ -219,6 +221,9 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
   const stopCamera = useCallback(() => {
     console.log('[Camera] Stopping camera...');
 
+    // Cancel any in-flight starts
+    lifecycleRef.current += 1;
+
     isStartingRef.current = false;
     isProcessingRef.current = false;
     inFlightSendRef.current = false;
@@ -226,15 +231,6 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
     if (rafIdRef.current) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
-    }
-
-    if (handsRef.current) {
-      try {
-        handsRef.current.close();
-      } catch (err) {
-        console.warn('[Camera] Error closing MediaPipe hands:', err);
-      }
-      handsRef.current = null;
     }
 
     if (streamRef.current) {
@@ -253,8 +249,21 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
       videoRef.current.srcObject = null;
     }
 
+    isInitializedRef.current = false;
     setIsInitialized(false);
     setIsLoading(false);
+  }, []);
+
+  // Close MediaPipe only when the hook truly unmounts (prevents wasm reload thrash on stop/start).
+  useEffect(() => {
+    return () => {
+      try {
+        handsRef.current?.close?.();
+      } catch (err) {
+        console.warn('[Camera] Error closing MediaPipe hands on unmount:', err);
+      }
+      handsRef.current = null;
+    };
   }, []);
 
   const startProcessingLoop = useCallback(() => {
@@ -262,6 +271,7 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
 
     const tick = async () => {
       if (!isProcessingRef.current) return;
+
       const video = videoRef.current;
       const hands = handsRef.current;
 
@@ -270,13 +280,12 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
         return;
       }
 
-      // Ensure we have pixels to process
       if (video.readyState < 2) {
         rafIdRef.current = requestAnimationFrame(tick);
         return;
       }
 
-      // Prevent overlapping sends (avoids memory build-up / instability)
+      // Prevent overlapping sends (avoids instability)
       if (inFlightSendRef.current) {
         rafIdRef.current = requestAnimationFrame(tick);
         return;
@@ -306,7 +315,11 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
     if (!video || !isActive) return;
 
     // Prevent multiple initializations.
-    if (isStartingRef.current || isInitialized) return;
+    if (isStartingRef.current || isInitializedRef.current) return;
+
+    const startId = (lifecycleRef.current += 1);
+
+    const stillCurrent = () => lifecycleRef.current === startId && isActive;
 
     try {
       isStartingRef.current = true;
@@ -315,8 +328,9 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
 
       console.log('[Camera] Starting camera initialization...');
 
-      // Ensure page + CDN scripts have had a chance to finish loading.
+      // Ensure page + CDN scripts are fully loaded.
       await waitForPageLoad();
+      if (!stillCurrent()) return;
 
       // Enforce secure context (HTTPS or localhost)
       if (typeof window !== 'undefined' && !window.isSecureContext) {
@@ -331,19 +345,26 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
       if (!loaded) {
         throw new Error('Failed to load hand detection libraries. Please refresh the page.');
       }
+      if (!stillCurrent()) return;
 
       if (typeof window.Hands !== 'function') {
         console.error('[MediaPipe] window.Hands is:', typeof window.Hands);
         throw new Error('Hand detection library not available. Please refresh the page.');
       }
 
-      // Request camera permission (and get a live stream) - ONE getUserMedia call.
+      // Request camera permission and get a live stream (single getUserMedia call).
       const stream = await requestPermission({
         width: { ideal: 640, min: 320, max: 1920 },
         height: { ideal: 480, min: 240, max: 1080 },
         facingMode: 'user',
         frameRate: { ideal: 30, max: 60 },
       });
+
+      if (!stillCurrent()) {
+        // If we got a stream but we are no longer active, stop it immediately.
+        stream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+        return;
+      }
 
       if (!stream) {
         console.error('[Camera] Permission not granted / stream not available');
@@ -358,36 +379,54 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
       streamRef.current = stream;
       video.srcObject = stream;
 
-      // Make sure video is playing and has frames.
       await waitForVideoReady(video);
+      if (!stillCurrent()) return;
 
       try {
         await video.play();
       } catch (err) {
-        // Some browsers may block autoplay, but because this is after permission prompt it should generally work.
+        // On some environments, play may reject even after permission.
         console.error('[Camera] Error calling video.play():', err);
       }
 
-      console.log('[MediaPipe] Initializing Hands...');
+      if (!stillCurrent()) return;
 
-      const hands = new window.Hands({
-        locateFile: (file: string) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${MEDIAPIPE_HANDS_VERSION}/${file}`,
-      });
+      // Create MediaPipe Hands once and reuse it across start/stop.
+      if (!handsRef.current) {
+        console.log('[MediaPipe] Initializing Hands...');
+        const hands = new window.Hands({
+          locateFile: (file: string) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${MEDIAPIPE_HANDS_VERSION}/${file}`,
+        });
 
-      hands.setOptions({
-        maxNumHands: 1,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.5,
-      });
+        hands.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.7,
+          minTrackingConfidence: 0.5,
+        });
 
-      hands.onResults(handleResults);
-      handsRef.current = hands;
+        hands.onResults(handleResults);
+        handsRef.current = hands;
+      } else {
+        // Ensure we are configured for 2 hands even after restarts.
+        try {
+          handsRef.current.setOptions?.({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.5,
+          });
+          handsRef.current.onResults?.(handleResults);
+        } catch (err) {
+          console.warn('[MediaPipe] Failed to reconfigure Hands:', err);
+        }
+      }
 
       // Start processing frames (no MediaPipe Camera helper; avoids double getUserMedia).
       startProcessingLoop();
 
+      isInitializedRef.current = true;
       setIsInitialized(true);
       setIsLoading(false);
       isStartingRef.current = false;
@@ -415,7 +454,7 @@ export function useMediaPipeHands({ onGestureDetected, isActive }: UseMediaPipeH
       stopCamera();
       isStartingRef.current = false;
     }
-  }, [isActive, isInitialized, requestPermission, startProcessingLoop, stopCamera, handleResults]);
+  }, [isActive, requestPermission, startProcessingLoop, stopCamera, handleResults]);
 
   useEffect(() => {
     if (isActive) {
