@@ -3,16 +3,20 @@ import { supabase } from '@/integrations/supabase/client';
 import { CallState, GestureMessage } from '@/types/call';
 import { RateLimiter } from '@/lib/throttle';
 
-// Fast STUN servers with low latency - ordered by typical response time
+// Multiple STUN servers for redundancy and speed
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
 ];
 
-// Shorter timeout for faster failure detection
-const CONNECTION_TIMEOUT_MS = 15000;
+// Timeouts for faster failure detection
+const CONNECTION_TIMEOUT_MS = 12000;
+const ICE_GATHERING_TIMEOUT_MS = 5000;
+const MAX_RETRY_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1500;
 
 interface UseWebRTCOptions {
   roomId: string;
@@ -35,109 +39,147 @@ interface SignalPayload {
     hindiText?: string;
     confidence?: number;
     timestamp?: number;
+    sequence?: number;
   };
 }
 
-// Rate limiter for signals: max 60 signals per minute (client-side)
-const signalRateLimiter = new RateLimiter(60, 60 * 1000);
+// Rate limiter for signals
+const signalRateLimiter = new RateLimiter(100, 60 * 1000);
 
 export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }: UseWebRTCOptions) {
   const [callState, setCallState] = useState<CallState>({ status: 'idle' });
   const [isRemoteConnected, setIsRemoteConnected] = useState(false);
+  
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-
   const processedSignalIdsRef = useRef<Set<string>>(new Set());
   const connectTimeoutRef = useRef<number | null>(null);
+  const retryCountRef = useRef(0);
+  const isInitiatorRef = useRef(false);
+  const signalSequenceRef = useRef(0);
+  const subscriptionReadyRef = useRef(false);
+  const pendingSignalsRef = useRef<SignalPayload[]>([]);
 
-  // Use authenticated user ID instead of random UUID
   const participantId = userId;
 
-  // Helper to send signal with rate limiting
+  // Clear timeout helper
+  const clearConnectionTimeout = useCallback(() => {
+    if (connectTimeoutRef.current) {
+      window.clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+  }, []);
+
+  // Send signal with sequence number for ordering
   const sendSignal = useCallback(async (signalType: string, signalData: Record<string, unknown>) => {
     if (!signalRateLimiter.canProceed()) {
       console.warn('[WebRTC] Signal rate limited');
       return false;
     }
 
+    const sequence = ++signalSequenceRef.current;
+    
     try {
+      const startTime = performance.now();
       await (supabase.from('call_signals') as any).insert({
         room_id: roomId,
         sender_id: participantId,
         signal_type: signalType,
-        signal_data: signalData,
+        signal_data: { ...signalData, sequence },
       });
+      
+      const elapsed = performance.now() - startTime;
+      console.log(`[WebRTC] Signal ${signalType} sent in ${elapsed.toFixed(0)}ms (seq: ${sequence})`);
+      
       signalRateLimiter.recordOperation();
       return true;
     } catch (error) {
-      // Handle rate limit error from database
-      if (error instanceof Error && error.message?.includes('Rate limit exceeded')) {
-        console.warn('[WebRTC] Database rate limit hit');
-      } else {
-        console.error('[WebRTC] Error sending signal:', error);
-      }
+      console.error('[WebRTC] Error sending signal:', error);
       return false;
     }
   }, [roomId, participantId]);
 
-  // Create peer connection with optimized settings
+  // Create optimized peer connection
   const createPeerConnection = useCallback(() => {
-    console.log('[WebRTC] Creating peer connection with optimized ICE config');
+    console.log('[WebRTC] Creating peer connection with optimized config');
+    
     const pc = new RTCPeerConnection({
       iceServers: ICE_SERVERS,
-      iceCandidatePoolSize: 10, // Pre-gather ICE candidates for faster connection
+      iceCandidatePoolSize: 10,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
     });
 
+    // ICE candidate handling - send immediately (trickle ICE)
     pc.onicecandidate = async (event) => {
       if (event.candidate) {
-        console.log('[WebRTC] Sending ICE candidate');
+        console.log('[WebRTC] ICE candidate ready, sending immediately');
         await sendSignal('ice-candidate', { candidate: event.candidate.toJSON() });
       }
     };
 
+    // ICE gathering state
+    pc.onicegatheringstatechange = () => {
+      console.log('[WebRTC] ICE gathering state:', pc.iceGatheringState);
+    };
+
+    // Signaling state
     pc.onsignalingstatechange = () => {
       console.log('[WebRTC] Signaling state:', pc.signalingState);
     };
 
+    // Connection state - primary indicator
     pc.onconnectionstatechange = () => {
       console.log('[WebRTC] Connection state:', pc.connectionState);
-      if (pc.connectionState === 'connected') {
-        setCallState((prev) => ({ ...prev, status: 'connected' }));
-      }
-      if (pc.connectionState === 'failed') {
-        setIsRemoteConnected(false);
-        setCallState((prev) => ({ ...prev, status: 'error', error: 'Connection failed. Please try again.' }));
+      
+      switch (pc.connectionState) {
+        case 'connected':
+          clearConnectionTimeout();
+          retryCountRef.current = 0;
+          setIsRemoteConnected(true);
+          setCallState((prev) => ({ ...prev, status: 'connected' }));
+          console.log('[WebRTC] ✓ Successfully connected!');
+          break;
+          
+        case 'failed':
+          console.error('[WebRTC] Connection failed');
+          handleConnectionFailure('Connection failed');
+          break;
+          
+        case 'disconnected':
+          console.warn('[WebRTC] Connection disconnected, may recover...');
+          setIsRemoteConnected(false);
+          // Don't immediately fail - may recover
+          break;
       }
     };
 
+    // ICE connection state - backup indicator
     pc.oniceconnectionstatechange = () => {
       console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
+      
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        clearConnectionTimeout();
         setIsRemoteConnected(true);
         setCallState((prev) => ({ ...prev, status: 'connected' }));
-      } else if (pc.iceConnectionState === 'disconnected') {
-        setIsRemoteConnected(false);
-        setCallState((prev) => ({ ...prev, status: 'disconnected' }));
       } else if (pc.iceConnectionState === 'failed') {
-        console.error('[WebRTC] ICE failed (likely NAT/TURN issue or signaling).');
-        setIsRemoteConnected(false);
-        setCallState((prev) => ({ ...prev, status: 'error', error: 'ICE negotiation failed. Try again or switch networks.' }));
+        console.error('[WebRTC] ICE connection failed');
+        handleConnectionFailure('ICE negotiation failed');
       }
     };
 
+    // Remote track received
     pc.ontrack = (event) => {
-      console.log('[WebRTC] Remote track received:', event.track.kind, 'streams:', event.streams.length);
+      console.log('[WebRTC] Remote track received:', event.track.kind);
       
-      // Get or create remote stream
       if (event.streams && event.streams[0]) {
         const remoteStream = event.streams[0];
-        console.log('[WebRTC] Using existing stream with tracks:', remoteStream.getTracks().length);
+        console.log('[WebRTC] Remote stream with', remoteStream.getTracks().length, 'tracks');
         setCallState((prev) => ({ ...prev, remoteStream }));
       } else {
-        // Fallback: create a new stream if none provided
-        console.log('[WebRTC] Creating new MediaStream for track');
+        console.log('[WebRTC] Creating new stream for track');
         setCallState((prev) => {
           const existingStream = prev.remoteStream || new MediaStream();
           existingStream.addTrack(event.track);
@@ -148,90 +190,142 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     peerConnectionRef.current = pc;
     return pc;
-  }, [sendSignal]);
+  }, [sendSignal, clearConnectionTimeout]);
 
-  // Handle incoming signals
+  // Handle connection failure with retry logic
+  const handleConnectionFailure = useCallback((reason: string) => {
+    console.error('[WebRTC] Connection failure:', reason);
+    
+    if (retryCountRef.current < MAX_RETRY_ATTEMPTS && isInitiatorRef.current) {
+      retryCountRef.current++;
+      console.log(`[WebRTC] Retrying connection (attempt ${retryCountRef.current}/${MAX_RETRY_ATTEMPTS})...`);
+      
+      // Close existing connection
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
+      }
+      
+      // Retry after delay
+      setTimeout(async () => {
+        if (localStreamRef.current && callState.status !== 'idle') {
+          console.log('[WebRTC] Attempting reconnection...');
+          const pc = createPeerConnection();
+          
+          localStreamRef.current.getTracks().forEach(track => {
+            pc.addTrack(track, localStreamRef.current!);
+          });
+          
+          const offer = await pc.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: true,
+          });
+          await pc.setLocalDescription(offer);
+          await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
+        }
+      }, RETRY_DELAY_MS);
+    } else {
+      setIsRemoteConnected(false);
+      setCallState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: `${reason}. Please check the room code and try again.`,
+      }));
+    }
+  }, [callState.status, createPeerConnection, sendSignal]);
+
+  // Process a signal
   const handleSignal = useCallback(async (signal: SignalPayload) => {
+    // Ignore own signals
     if (signal.sender_id === participantId) return;
 
-    // Dedupe: subscription + backlog fetch can deliver the same signal
+    // Dedupe signals
+    if (signal.id && processedSignalIdsRef.current.has(signal.id)) {
+      return;
+    }
     if (signal.id) {
-      if (processedSignalIdsRef.current.has(signal.id)) return;
       processedSignalIdsRef.current.add(signal.id);
     }
 
     const pc = peerConnectionRef.current;
-    if (!pc && signal.signal_type !== 'offer') {
-      console.log('[WebRTC] No peer connection, ignoring signal:', signal.signal_type);
-      return;
-    }
-
-    console.log('[WebRTC] Handling signal:', signal.signal_type);
+    
+    console.log('[WebRTC] Processing signal:', signal.signal_type, 'seq:', signal.signal_data.sequence);
 
     try {
       switch (signal.signal_type) {
         case 'offer': {
-          console.log('[WebRTC] Processing offer from remote peer');
+          console.log('[WebRTC] Received offer from remote peer');
+          
+          // Create new PC if needed
           const newPc = pc || createPeerConnection();
           
-          // Add local tracks BEFORE setting remote description (critical for two-way video!)
+          // Add local tracks FIRST
           if (localStreamRef.current) {
-            console.log('[WebRTC] Adding local tracks to answer peer connection');
+            console.log('[WebRTC] Adding local tracks before answer');
             localStreamRef.current.getTracks().forEach(track => {
-              console.log('[WebRTC] Adding track for answer:', track.kind);
               newPc.addTrack(track, localStreamRef.current!);
             });
           } else {
-            console.warn('[WebRTC] No local stream available when processing offer!');
+            console.warn('[WebRTC] No local stream when processing offer!');
           }
 
+          // Set remote description
           const offerData = signal.signal_data as { type: RTCSdpType; sdp: string };
           await newPc.setRemoteDescription(new RTCSessionDescription({
             type: offerData.type,
             sdp: offerData.sdp,
           }));
-          console.log('[WebRTC] Set remote description (offer)');
+          console.log('[WebRTC] Remote description set (offer)');
           
-          // Process pending candidates
-          for (const candidate of pendingCandidatesRef.current) {
+          // Process any pending ICE candidates
+          while (pendingCandidatesRef.current.length > 0) {
+            const candidate = pendingCandidatesRef.current.shift()!;
             await newPc.addIceCandidate(new RTCIceCandidate(candidate));
           }
-          pendingCandidatesRef.current = [];
 
+          // Create and send answer
           const answer = await newPc.createAnswer();
           await newPc.setLocalDescription(answer);
-          console.log('[WebRTC] Created and set local answer');
+          console.log('[WebRTC] Local description set (answer)');
 
           await sendSignal('answer', { type: answer.type, sdp: answer.sdp });
           break;
         }
 
         case 'answer': {
-          if (pc && pc.signalingState === 'have-local-offer') {
-            console.log('[WebRTC] Processing answer from remote peer');
-            const answerData = signal.signal_data as { type: RTCSdpType; sdp: string };
-            await pc.setRemoteDescription(new RTCSessionDescription({
-              type: answerData.type,
-              sdp: answerData.sdp,
-            }));
-            console.log('[WebRTC] Set remote description (answer)');
-            
-            // Process pending candidates
-            for (const candidate of pendingCandidatesRef.current) {
-              await pc.addIceCandidate(new RTCIceCandidate(candidate));
-            }
-            pendingCandidatesRef.current = [];
-          } else {
-            console.warn('[WebRTC] Received answer but not in correct state:', pc?.signalingState);
+          if (!pc) {
+            console.warn('[WebRTC] No PC for answer');
+            return;
+          }
+          
+          if (pc.signalingState !== 'have-local-offer') {
+            console.warn('[WebRTC] Ignoring answer, wrong state:', pc.signalingState);
+            return;
+          }
+          
+          console.log('[WebRTC] Received answer from remote peer');
+          const answerData = signal.signal_data as { type: RTCSdpType; sdp: string };
+          await pc.setRemoteDescription(new RTCSessionDescription({
+            type: answerData.type,
+            sdp: answerData.sdp,
+          }));
+          console.log('[WebRTC] Remote description set (answer)');
+          
+          // Process pending ICE candidates
+          while (pendingCandidatesRef.current.length > 0) {
+            const candidate = pendingCandidatesRef.current.shift()!;
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
           }
           break;
         }
 
         case 'ice-candidate': {
           const candidateData = signal.signal_data as { candidate: RTCIceCandidateInit };
+          
           if (pc && pc.remoteDescription) {
             await pc.addIceCandidate(new RTCIceCandidate(candidateData.candidate));
           } else {
+            // Queue for later
             pendingCandidatesRef.current.push(candidateData.candidate);
           }
           break;
@@ -270,29 +364,39 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     }
   }, [participantId, createPeerConnection, onGestureReceived, onTextReceived, sendSignal]);
 
-  // Start call as initiator
+  // Start call as initiator (host)
   const startCall = useCallback(async (localStream: MediaStream) => {
+    const startTime = performance.now();
     console.log('[WebRTC] Starting call as initiator');
-    console.log('[WebRTC] Local stream tracks:', localStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
     
+    isInitiatorRef.current = true;
+    retryCountRef.current = 0;
     setCallState({ status: 'connecting', localStream });
     localStreamRef.current = localStream;
 
+    // Wait for subscription to be ready
+    if (!subscriptionReadyRef.current) {
+      console.log('[WebRTC] Waiting for subscription...');
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
     const pc = createPeerConnection();
 
-    // Add local tracks BEFORE creating offer (critical!)
+    // Add tracks
     localStream.getTracks().forEach(track => {
-      console.log('[WebRTC] Adding track to peer connection:', track.kind);
+      console.log('[WebRTC] Adding track:', track.kind);
       pc.addTrack(track, localStream);
     });
 
-    // Create and send offer with proper options
+    // Create offer
     const offer = await pc.createOffer({
       offerToReceiveAudio: true,
       offerToReceiveVideo: true,
     });
     await pc.setLocalDescription(offer);
-    console.log('[WebRTC] Created and set local offer');
+    
+    const elapsed = performance.now() - startTime;
+    console.log(`[WebRTC] Offer created in ${elapsed.toFixed(0)}ms`);
 
     await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
   }, [createPeerConnection, sendSignal]);
@@ -300,16 +404,23 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   // Join call as responder
   const joinCall = useCallback(async (localStream: MediaStream) => {
     console.log('[WebRTC] Joining call as responder');
-    console.log('[WebRTC] Local stream tracks:', localStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
     
+    isInitiatorRef.current = false;
+    retryCountRef.current = 0;
     setCallState({ status: 'connecting', localStream });
     localStreamRef.current = localStream;
     
-    // Note: We don't create offer here - we wait for the host's offer
-    // The handleSignal function will create the peer connection and answer when offer arrives
-  }, []);
+    // Process any signals that arrived before we joined
+    if (pendingSignalsRef.current.length > 0) {
+      console.log('[WebRTC] Processing', pendingSignalsRef.current.length, 'pending signals');
+      for (const signal of pendingSignalsRef.current) {
+        await handleSignal(signal);
+      }
+      pendingSignalsRef.current = [];
+    }
+  }, [handleSignal]);
 
-  // Send gesture to remote with rate limiting
+  // Send gesture
   const sendGesture = useCallback(async (message: GestureMessage) => {
     await sendSignal('gesture', {
       gesture: message.gesture,
@@ -320,7 +431,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     });
   }, [sendSignal]);
 
-  // Send text message with rate limiting
+  // Send text
   const sendText = useCallback(async (text: string) => {
     await sendSignal('text', { text });
   }, [sendSignal]);
@@ -329,13 +440,12 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   const endCall = useCallback(() => {
     console.log('[WebRTC] Ending call');
 
-    if (connectTimeoutRef.current) {
-      window.clearTimeout(connectTimeoutRef.current);
-      connectTimeoutRef.current = null;
-    }
-
+    clearConnectionTimeout();
     pendingCandidatesRef.current = [];
     processedSignalIdsRef.current = new Set();
+    pendingSignalsRef.current = [];
+    retryCountRef.current = 0;
+    signalSequenceRef.current = 0;
 
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
@@ -352,20 +462,20 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
       channelRef.current = null;
     }
 
+    subscriptionReadyRef.current = false;
     setCallState({ status: 'idle' });
     setIsRemoteConnected(false);
-  }, []);
+  }, [clearConnectionTimeout]);
 
-  // Subscribe to signals (and also fetch backlog so we don't miss the offer)
+  // Subscribe to signals
   useEffect(() => {
     if (!roomId || !participantId) return;
 
-    console.log('[WebRTC] Subscribing to room signals:', roomId);
-
+    console.log('[WebRTC] Setting up signal subscription for room:', roomId);
     let cancelled = false;
 
     const channel = supabase
-      .channel(`room-${roomId}`)
+      .channel(`room-${roomId}-${participantId}`)
       .on(
         'postgres_changes',
         {
@@ -375,37 +485,51 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
           filter: `room_id=eq.${roomId}`,
         },
         (payload) => {
+          if (cancelled) return;
           const signal = payload.new as SignalPayload;
-          console.log('[WebRTC] Signal received via realtime:', signal.signal_type);
+          console.log('[WebRTC] Realtime signal:', signal.signal_type);
           handleSignal(signal);
         }
       )
       .subscribe((status) => {
-        console.log('[WebRTC] Realtime subscription status:', status);
+        console.log('[WebRTC] Subscription status:', status);
+        if (status === 'SUBSCRIBED') {
+          subscriptionReadyRef.current = true;
+        }
       });
 
     channelRef.current = channel;
 
-    // Fetch recent signals so a late joiner doesn't miss the offer
+    // Fetch backlog of signals
     (async () => {
       const { data, error } = await (supabase
         .from('call_signals') as any)
         .select('*')
         .eq('room_id', roomId)
         .order('created_at', { ascending: true })
-        .limit(100);
+        .limit(50);
 
       if (cancelled) return;
 
       if (error) {
-        console.warn('[WebRTC] Failed to fetch signal backlog:', error.message);
+        console.warn('[WebRTC] Backlog fetch error:', error.message);
         return;
       }
 
-      if (Array.isArray(data) && data.length) {
-        console.log('[WebRTC] Processing signal backlog:', data.length);
-        for (const row of data) {
-          await handleSignal(row as SignalPayload);
+      if (Array.isArray(data) && data.length > 0) {
+        console.log('[WebRTC] Processing', data.length, 'backlog signals');
+        
+        // Sort by sequence if available
+        const sorted = data.sort((a: any, b: any) => 
+          (a.signal_data?.sequence || 0) - (b.signal_data?.sequence || 0)
+        );
+        
+        for (const row of sorted) {
+          if (localStreamRef.current) {
+            await handleSignal(row as SignalPayload);
+          } else {
+            pendingSignalsRef.current.push(row as SignalPayload);
+          }
         }
       }
     })();
@@ -413,34 +537,27 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     return () => {
       cancelled = true;
       supabase.removeChannel(channel);
+      channelRef.current = null;
     };
   }, [roomId, participantId, handleSignal]);
 
-  // Connecting watchdog: never stay stuck forever
+  // Connection timeout watchdog
   useEffect(() => {
     if (callState.status !== 'connecting') return;
-    if (isRemoteConnected) return;
-
-    if (connectTimeoutRef.current) {
-      window.clearTimeout(connectTimeoutRef.current);
+    if (isRemoteConnected) {
+      clearConnectionTimeout();
+      return;
     }
 
-    connectTimeoutRef.current = window.setTimeout(() => {
-      console.error('[WebRTC] Connection timed out');
-      setCallState((prev) => ({
-        ...prev,
-        status: 'error',
-        error: 'Connection timed out. Check the room code and try again.',
-      }));
-    }, CONNECTION_TIMEOUT_MS); // Use the faster timeout
+    clearConnectionTimeout();
 
-    return () => {
-      if (connectTimeoutRef.current) {
-        window.clearTimeout(connectTimeoutRef.current);
-        connectTimeoutRef.current = null;
-      }
-    };
-  }, [callState.status, isRemoteConnected]);
+    connectTimeoutRef.current = window.setTimeout(() => {
+      console.error('[WebRTC] Connection timeout');
+      handleConnectionFailure('Connection timed out');
+    }, CONNECTION_TIMEOUT_MS);
+
+    return clearConnectionTimeout;
+  }, [callState.status, isRemoteConnected, clearConnectionTimeout, handleConnectionFailure]);
 
   // Cleanup on unmount
   useEffect(() => {

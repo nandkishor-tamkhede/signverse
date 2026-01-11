@@ -288,35 +288,67 @@ export function CallInterface({
               <motion.div 
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="text-center"
+                className="text-center max-w-md px-4"
               >
                 <div className="w-32 h-32 rounded-full bg-muted flex items-center justify-center mx-auto mb-6">
                   <User className="w-16 h-16 text-muted-foreground" />
                 </div>
-                <div className="flex items-center justify-center gap-2 mb-2">
+                <div className="flex items-center justify-center gap-2 mb-3">
                   {connectionStatus === 'connecting' ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                      <span className="text-lg">Connecting...</span>
+                    </>
                   ) : connectionStatus === 'error' ? (
-                    <div className="w-2 h-2 rounded-full bg-destructive" />
+                    <>
+                      <div className="w-3 h-3 rounded-full bg-destructive" />
+                      <span className="text-lg text-destructive">Connection failed</span>
+                    </>
                   ) : (
-                    <div className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+                    <>
+                      <div className="w-3 h-3 rounded-full bg-yellow-400 animate-pulse" />
+                      <span className="text-lg">Waiting for participant...</span>
+                    </>
                   )}
-                  <span className="text-lg">
-                    {connectionStatus === 'connecting'
-                      ? 'Connecting...'
-                      : connectionStatus === 'error'
-                        ? 'Connection failed'
-                        : 'Waiting for participant...'}
-                  </span>
                 </div>
+                
+                {connectionStatus === 'connecting' && (
+                  <div className="mb-4">
+                    <div className="flex items-center justify-center gap-1">
+                      {[0, 1, 2].map((i) => (
+                        <motion.div
+                          key={i}
+                          className="w-2 h-2 bg-primary rounded-full"
+                          animate={{ opacity: [0.3, 1, 0.3] }}
+                          transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                        />
+                      ))}
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-2">
+                      Establishing peer-to-peer connection...
+                    </p>
+                  </div>
+                )}
+                
                 {connectionStatus === 'error' && callState.error ? (
-                  <p className="text-destructive text-sm max-w-md mx-auto">
-                    {callState.error}
-                  </p>
+                  <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-4 mb-4">
+                    <p className="text-destructive text-sm">{callState.error}</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={onEndCall}
+                      className="mt-3"
+                    >
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      Try Again
+                    </Button>
+                  </div>
                 ) : (
-                  <p className="text-muted-foreground text-sm">
-                    Room: <span className="font-mono">{room.room_code}</span>
-                  </p>
+                  <div className="bg-muted/50 rounded-lg px-4 py-2 inline-block">
+                    <p className="text-muted-foreground text-sm">
+                      Room: <span className="font-mono font-bold">{room.room_code}</span>
+                    </p>
+                  </div>
                 )}
               </motion.div>
             </div>
