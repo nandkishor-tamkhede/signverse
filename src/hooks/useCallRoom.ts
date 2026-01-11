@@ -59,6 +59,12 @@ export function useCallRoom() {
         throw insertError;
       }
 
+      // Register creator as a participant
+      await (supabase.from('room_participants') as any).insert({
+        room_id: data.id,
+        user_id: userId,
+      });
+
       roomCreationLimiter.recordOperation();
       const callRoom = data as CallRoom;
       setRoom(callRoom);
@@ -72,7 +78,7 @@ export function useCallRoom() {
     }
   }, []);
 
-  const joinRoom = useCallback(async (roomCode: string): Promise<CallRoom | null> => {
+  const joinRoom = useCallback(async (roomCode: string, userId: string): Promise<CallRoom | null> => {
     // Basic input validation
     const sanitizedCode = roomCode.toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (sanitizedCode.length !== 6) {
@@ -99,6 +105,12 @@ export function useCallRoom() {
         throw fetchError;
       }
 
+      // Register joiner as a participant
+      await (supabase.from('room_participants') as any).insert({
+        room_id: data.id,
+        user_id: userId,
+      }).onConflict('room_id,user_id').ignore(); // Ignore if already a participant
+
       const callRoom = data as CallRoom;
       setRoom(callRoom);
       return callRoom;
@@ -111,10 +123,17 @@ export function useCallRoom() {
     }
   }, []);
 
-  const leaveRoom = useCallback(async () => {
+  const leaveRoom = useCallback(async (userId?: string) => {
+    // Remove user from participants if userId provided
+    if (room && userId) {
+      await (supabase.from('room_participants') as any)
+        .delete()
+        .eq('room_id', room.id)
+        .eq('user_id', userId);
+    }
     setRoom(null);
     setError(null);
-  }, []);
+  }, [room]);
 
   return {
     room,

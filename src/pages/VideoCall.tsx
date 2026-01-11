@@ -81,7 +81,14 @@ export default function VideoCall() {
 
   // Handle join room
   const handleJoinRoom = async (code: string) => {
-    const joinedRoom = await joinRoom(code);
+    if (!user?.id) {
+      const authenticatedUser = await ensureAuthenticated();
+      if (!authenticatedUser) {
+        toast.error('Authentication required');
+        return;
+      }
+    }
+    const joinedRoom = await joinRoom(code, user?.id || '');
     if (!joinedRoom) {
       toast.error(error || 'Failed to join room');
     }
@@ -116,7 +123,7 @@ export default function VideoCall() {
   // Handle end call
   const handleEndCall = () => {
     endCall();
-    leaveRoom();
+    leaveRoom(user?.id);
     setPhase('role-selection');
     setRole(null);
     setReceivedGestures([]);
@@ -127,7 +134,7 @@ export default function VideoCall() {
   // Handle back navigation
   const handleBack = () => {
     if (phase === 'lobby') {
-      leaveRoom();
+      leaveRoom(user?.id);
       setPhase('role-selection');
       setRole(null);
     }
