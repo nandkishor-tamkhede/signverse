@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import { motion } from 'framer-motion';
-import { Copy, ArrowLeft, Users, Plus, LogIn } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Copy, ArrowLeft, Users, Plus, LogIn, Check, Video } from 'lucide-react';
 import { UserRole, CallRoom } from '@/types/call';
-import { GlassCard } from '@/components/GlassCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
@@ -30,11 +29,14 @@ export function RoomLobby({
 }: RoomLobbyProps) {
   const [roomCode, setRoomCode] = useState('');
   const [mode, setMode] = useState<'select' | 'create' | 'join'>('select');
+  const [copied, setCopied] = useState(false);
 
   const copyRoomCode = () => {
     if (room) {
       navigator.clipboard.writeText(room.room_code);
-      toast.success('Room code copied to clipboard!');
+      setCopied(true);
+      toast.success('Room code copied!');
+      setTimeout(() => setCopied(false), 2000);
     }
   };
 
@@ -45,184 +47,244 @@ export function RoomLobby({
     }
   };
 
+  // Room ready state
   if (room) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
-          className="max-w-md w-full"
+          className="max-w-lg w-full"
         >
-          <GlassCard className="p-8">
+          <div className="relative overflow-hidden rounded-3xl bg-card border border-border p-8 md:p-10">
+            {/* Background decoration */}
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary via-accent to-primary" />
+            
             <div className="text-center space-y-6">
-              <div className="p-4 rounded-full bg-primary/20 w-fit mx-auto">
-                <Users className="w-12 h-12 text-primary" />
+              {/* Success icon */}
+              <motion.div
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ type: 'spring', delay: 0.2 }}
+                className="w-20 h-20 rounded-full bg-green-500/20 flex items-center justify-center mx-auto"
+              >
+                <Check className="w-10 h-10 text-green-500" />
+              </motion.div>
+              
+              <div>
+                <h2 className="text-2xl font-bold mb-2">Room Created!</h2>
+                <p className="text-muted-foreground">
+                  Share this code with the other person
+                </p>
               </div>
               
-              <h2 className="text-2xl font-bold">Room Ready!</h2>
-              
-              <div className="space-y-2">
-                <p className="text-muted-foreground text-sm">Share this code with the other person</p>
-                <div className="flex items-center justify-center gap-2">
-                  <div className="text-4xl font-mono font-bold tracking-wider gradient-text">
+              {/* Room code */}
+              <div className="bg-muted/50 rounded-2xl p-6">
+                <p className="text-sm text-muted-foreground mb-2">Room Code</p>
+                <div className="flex items-center justify-center gap-3">
+                  <span className="text-4xl md:text-5xl font-mono font-bold tracking-[0.3em] gradient-text">
                     {room.room_code}
-                  </div>
+                  </span>
                   <Button
                     variant="ghost"
                     size="icon"
                     onClick={copyRoomCode}
-                    className="shrink-0"
+                    className="shrink-0 rounded-full"
                   >
-                    <Copy className="w-5 h-5" />
+                    {copied ? (
+                      <Check className="w-5 h-5 text-green-500" />
+                    ) : (
+                      <Copy className="w-5 h-5" />
+                    )}
                   </Button>
                 </div>
               </div>
 
-              <div className="text-sm text-muted-foreground">
-                Your role: <span className="font-medium text-foreground">
-                  {role === 'signer' ? 'Sign Language User' : 'AI Voice Listener'}
-                </span>
+              {/* Role badge */}
+              <div className="inline-flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-sm">
+                <Users className="w-4 h-4" />
+                {role === 'signer' ? 'Sign Language User' : 'AI Voice Listener'}
               </div>
 
-              <Button
-                onClick={onStartCall}
-                className="w-full h-12 text-lg"
-                size="lg"
-              >
-                Start Call
-              </Button>
+              {/* Actions */}
+              <div className="space-y-3 pt-4">
+                <Button
+                  onClick={onStartCall}
+                  size="lg"
+                  className="w-full h-14 text-lg rounded-xl"
+                >
+                  <Video className="w-5 h-5 mr-2" />
+                  Start Video Call
+                </Button>
 
-              <Button
-                variant="ghost"
-                onClick={onBack}
-                className="w-full"
-              >
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Go Back
-              </Button>
+                <Button
+                  variant="ghost"
+                  onClick={onBack}
+                  className="w-full"
+                >
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Back to Role Selection
+                </Button>
+              </div>
             </div>
-          </GlassCard>
+          </div>
         </motion.div>
       </div>
     );
   }
 
+  // Select mode
   if (mode === 'select') {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full"
+          className="max-w-lg w-full"
         >
-          <GlassCard className="p-8">
-            <div className="space-y-6">
-              <Button
-                variant="ghost"
-                onClick={onBack}
-                className="mb-4"
-              >
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Change Role
-              </Button>
+          <div className="rounded-3xl bg-card border border-border p-8 md:p-10">
+            <Button
+              variant="ghost"
+              onClick={onBack}
+              className="mb-6 -ml-2"
+            >
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back
+            </Button>
 
-              <h2 className="text-2xl font-bold text-center">
-                {role === 'signer' ? 'Sign Language User' : 'AI Voice Listener'}
-              </h2>
+            {/* Role indicator */}
+            <div className="inline-flex items-center gap-2 bg-primary/10 text-primary px-3 py-1.5 rounded-full text-sm mb-6">
+              <Users className="w-4 h-4" />
+              {role === 'signer' ? 'Sign Language User' : 'AI Voice Listener'}
+            </div>
 
-              <div className="space-y-4">
+            <h2 className="text-2xl font-bold mb-2">Join or Create Room</h2>
+            <p className="text-muted-foreground mb-8">
+              Create a new room or join an existing one with a code.
+            </p>
+
+            <div className="space-y-4">
+              <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
                 <Button
                   onClick={() => {
                     setMode('create');
                     onCreateRoom();
                   }}
-                  className="w-full h-14 text-lg"
+                  className="w-full h-16 text-lg rounded-xl justify-start px-6"
                   disabled={isLoading}
                 >
-                  <Plus className="w-5 h-5 mr-2" />
-                  Create New Room
+                  <div className="w-12 h-12 rounded-full bg-primary-foreground/20 flex items-center justify-center mr-4">
+                    <Plus className="w-6 h-6" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-semibold">Create New Room</div>
+                    <div className="text-sm opacity-80">Start a new video call</div>
+                  </div>
                 </Button>
+              </motion.div>
 
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-border" />
-                  </div>
-                  <div className="relative flex justify-center text-sm">
-                    <span className="px-2 bg-card text-muted-foreground">or</span>
-                  </div>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-border" />
                 </div>
+                <div className="relative flex justify-center">
+                  <span className="px-4 bg-card text-muted-foreground text-sm">or</span>
+                </div>
+              </div>
 
+              <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
                 <Button
                   variant="outline"
                   onClick={() => setMode('join')}
-                  className="w-full h-14 text-lg"
+                  className="w-full h-16 text-lg rounded-xl justify-start px-6"
                 >
-                  <LogIn className="w-5 h-5 mr-2" />
-                  Join Existing Room
+                  <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mr-4">
+                    <LogIn className="w-6 h-6" />
+                  </div>
+                  <div className="text-left">
+                    <div className="font-semibold">Join with Code</div>
+                    <div className="text-sm text-muted-foreground">Enter a room code</div>
+                  </div>
                 </Button>
-              </div>
+              </motion.div>
             </div>
-          </GlassCard>
+          </div>
         </motion.div>
       </div>
     );
   }
 
+  // Join mode
   if (mode === 'join') {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full"
+          className="max-w-lg w-full"
         >
-          <GlassCard className="p-8">
+          <div className="rounded-3xl bg-card border border-border p-8 md:p-10">
             <form onSubmit={handleJoinSubmit} className="space-y-6">
               <Button
                 type="button"
                 variant="ghost"
                 onClick={() => setMode('select')}
-                className="mb-4"
+                className="-ml-2"
               >
                 <ArrowLeft className="w-4 h-4 mr-2" />
                 Back
               </Button>
 
-              <h2 className="text-2xl font-bold text-center">Join Room</h2>
+              <div>
+                <h2 className="text-2xl font-bold mb-2">Join Room</h2>
+                <p className="text-muted-foreground">
+                  Enter the 6-character code shared by the host
+                </p>
+              </div>
 
-              <div className="space-y-2">
-                <label className="text-sm text-muted-foreground">
-                  Enter the 6-character room code
-                </label>
+              <div className="space-y-3">
                 <Input
                   value={roomCode}
                   onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
                   placeholder="ABCD12"
-                  className="text-center text-2xl font-mono tracking-wider h-14"
+                  className="text-center text-3xl font-mono tracking-[0.3em] h-16 rounded-xl"
                   maxLength={6}
                   autoFocus
                 />
+                {error && (
+                  <motion.p
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="text-destructive text-sm text-center"
+                  >
+                    {error}
+                  </motion.p>
+                )}
               </div>
-
-              {error && (
-                <p className="text-destructive text-sm text-center">{error}</p>
-              )}
 
               <Button
                 type="submit"
-                className="w-full h-12"
+                size="lg"
+                className="w-full h-14 text-lg rounded-xl"
                 disabled={isLoading || roomCode.length !== 6}
               >
-                {isLoading ? 'Joining...' : 'Join Room'}
+                {isLoading ? (
+                  <>
+                    <div className="w-5 h-5 border-2 border-primary-foreground border-t-transparent rounded-full animate-spin mr-2" />
+                    Joining...
+                  </>
+                ) : (
+                  'Join Room'
+                )}
               </Button>
             </form>
-          </GlassCard>
+          </div>
         </motion.div>
       </div>
     );
   }
 
-  // Creating room - show loading
+  // Creating room - loading state
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <motion.div
@@ -230,8 +292,9 @@ export function RoomLobby({
         animate={{ opacity: 1 }}
         className="text-center"
       >
-        <div className="animate-spin w-12 h-12 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4" />
-        <p className="text-muted-foreground">Creating room...</p>
+        <div className="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-6" />
+        <h2 className="text-xl font-semibold mb-2">Creating your room...</h2>
+        <p className="text-muted-foreground">This will just take a moment</p>
       </motion.div>
     </div>
   );

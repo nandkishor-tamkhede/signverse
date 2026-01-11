@@ -1,5 +1,7 @@
 import { motion } from 'framer-motion';
-import { Hand, Sparkles } from 'lucide-react';
+import { Hand, Sparkles, Video } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Button } from '@/components/ui/button';
 
 export function Header() {
   return (
@@ -68,6 +70,21 @@ export function Header() {
           <span className="w-2 h-2 rounded-full bg-accent animate-pulse" />
           Multi-language
         </span>
+      </motion.div>
+
+      {/* Video Call CTA */}
+      <motion.div
+        className="mt-6"
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.8 }}
+      >
+        <Link to="/call">
+          <Button size="lg" className="gap-2 rounded-full px-6 shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 transition-shadow">
+            <Video className="w-5 h-5" />
+            Start Video Call
+          </Button>
+        </Link>
       </motion.div>
     </motion.header>
   );
