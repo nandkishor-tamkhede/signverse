@@ -115,23 +115,46 @@ export function useLearningProgress() {
       const newBestAccuracy = Math.max(existing?.bestAccuracy || 0, accuracy);
       const newAttempts = (existing?.attempts || 0) + 1;
 
-      // Upsert gesture progress
-      const { error } = await supabase
+      // Check if record exists first
+      const { data: existingRecord } = await supabase
         .from('user_learning_progress')
-        .upsert({
-          user_id: user.id,
-          level_id: levelId,
-          gesture_id: gestureId,
-          completed: completed || (existing?.completed || false),
-          accuracy_score: accuracy,
-          best_accuracy: newBestAccuracy,
-          attempts: newAttempts,
-          last_practiced_at: new Date().toISOString(),
-        }, {
-          onConflict: 'user_id,level_id,gesture_id',
-        });
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('level_id', levelId)
+        .eq('gesture_id', gestureId)
+        .maybeSingle();
 
-      if (error) throw error;
+      if (existingRecord) {
+        // Update existing record
+        const { error } = await supabase
+          .from('user_learning_progress')
+          .update({
+            completed: completed || (existing?.completed || false),
+            accuracy_score: accuracy,
+            best_accuracy: newBestAccuracy,
+            attempts: newAttempts,
+            last_practiced_at: new Date().toISOString(),
+          })
+          .eq('id', existingRecord.id);
+
+        if (error) throw error;
+      } else {
+        // Insert new record
+        const { error } = await supabase
+          .from('user_learning_progress')
+          .insert({
+            user_id: user.id,
+            level_id: levelId,
+            gesture_id: gestureId,
+            completed: completed || false,
+            accuracy_score: accuracy,
+            best_accuracy: newBestAccuracy,
+            attempts: newAttempts,
+            last_practiced_at: new Date().toISOString(),
+          });
+
+        if (error) throw error;
+      }
 
       // Update local state
       setGestureProgress(prev => {
@@ -175,35 +198,66 @@ export function useLearningProgress() {
     const isLevelComplete = completedCount >= level.gestures.length;
 
     try {
-      // Update current level
-      await supabase
+      // Check if level progress exists
+      const { data: existingLevel } = await supabase
         .from('user_level_progress')
-        .upsert({
-          user_id: user.id,
-          level_id: levelId,
-          gestures_completed: completedCount,
-          total_gestures: level.gestures.length,
-          is_unlocked: true,
-          completed_at: isLevelComplete ? new Date().toISOString() : null,
-        }, {
-          onConflict: 'user_id,level_id',
-        });
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('level_id', levelId)
+        .maybeSingle();
+
+      if (existingLevel) {
+        // Update current level
+        await supabase
+          .from('user_level_progress')
+          .update({
+            gestures_completed: completedCount,
+            total_gestures: level.gestures.length,
+            is_unlocked: true,
+            completed_at: isLevelComplete ? new Date().toISOString() : null,
+          })
+          .eq('id', existingLevel.id);
+      } else {
+        // Insert new level progress
+        await supabase
+          .from('user_level_progress')
+          .insert({
+            user_id: user.id,
+            level_id: levelId,
+            gestures_completed: completedCount,
+            total_gestures: level.gestures.length,
+            is_unlocked: true,
+            completed_at: isLevelComplete ? new Date().toISOString() : null,
+          });
+      }
 
       // Unlock next level if current is complete
       if (isLevelComplete && levelId < LEARNING_LEVELS.length) {
         const nextLevel = LEARNING_LEVELS.find(l => l.id === levelId + 1);
         if (nextLevel) {
-          await supabase
+          const { data: existingNextLevel } = await supabase
             .from('user_level_progress')
-            .upsert({
-              user_id: user.id,
-              level_id: nextLevel.id,
-              gestures_completed: 0,
-              total_gestures: nextLevel.gestures.length,
-              is_unlocked: true,
-            }, {
-              onConflict: 'user_id,level_id',
-            });
+            .select('id')
+            .eq('user_id', user.id)
+            .eq('level_id', nextLevel.id)
+            .maybeSingle();
+
+          if (existingNextLevel) {
+            await supabase
+              .from('user_level_progress')
+              .update({ is_unlocked: true })
+              .eq('id', existingNextLevel.id);
+          } else {
+            await supabase
+              .from('user_level_progress')
+              .insert({
+                user_id: user.id,
+                level_id: nextLevel.id,
+                gestures_completed: 0,
+                total_gestures: nextLevel.gestures.length,
+                is_unlocked: true,
+              });
+          }
         }
       }
 

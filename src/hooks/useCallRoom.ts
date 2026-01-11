@@ -105,11 +105,26 @@ export function useCallRoom() {
         throw fetchError;
       }
 
-      // Register joiner as a participant
-      await (supabase.from('room_participants') as any).insert({
-        room_id: data.id,
-        user_id: userId,
-      }).onConflict('room_id,user_id').ignore(); // Ignore if already a participant
+      // Register joiner as a participant (check if already exists first)
+      const { data: existingParticipant } = await (supabase
+        .from('room_participants') as any)
+        .select('id')
+        .eq('room_id', data.id)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (!existingParticipant) {
+        const { error: participantError } = await (supabase
+          .from('room_participants') as any)
+          .insert({
+            room_id: data.id,
+            user_id: userId,
+          });
+        
+        if (participantError) {
+          console.warn('[CallRoom] Could not register as participant:', participantError.message);
+        }
+      }
 
       const callRoom = data as CallRoom;
       setRoom(callRoom);
