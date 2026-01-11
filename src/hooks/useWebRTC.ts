@@ -3,8 +3,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { CallState, GestureMessage } from '@/types/call';
 import { RateLimiter } from '@/lib/throttle';
 
-// Optimized STUN servers - prioritize fastest, most reliable
-const ICE_SERVERS = [
+// Default STUN servers (fast path). TURN relays can be added dynamically.
+const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
@@ -36,6 +36,7 @@ interface SignalPayload {
     confidence?: number;
     timestamp?: number;
     sequence?: number;
+    call_session_id?: string;
   };
 }
 
@@ -57,6 +58,10 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   const signalSequenceRef = useRef(0);
   const subscriptionReadyRef = useRef(false);
   const pendingSignalsRef = useRef<SignalPayload[]>([]);
+
+  // ICE servers (starts with STUN; may be upgraded to TURN on retry)
+  const iceServersRef = useRef<RTCIceServer[]>(DEFAULT_ICE_SERVERS);
+  const hasTurnServersRef = useRef(false);
 
   // Prevent stale signaling from previous attempts within the same room.
   // Initiator generates a new session id; responder adopts it from the first offer.
@@ -96,7 +101,56 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     }
   }, []);
 
-  // Send signal with sequence number for ordering
+  const loadIceServers = useCallback(async () => {
+    try {
+      const { data, error } = await supabase.functions.invoke('ice-servers');
+      if (error) throw error;
+
+      const servers = (data as any)?.iceServers as RTCIceServer[] | undefined;
+      if (Array.isArray(servers) && servers.length > 0) {
+        iceServersRef.current = servers;
+
+        hasTurnServersRef.current = servers.some((s: any) => {
+          const urls = s?.urls;
+          const list = Array.isArray(urls) ? urls : [urls];
+          return list.some((u: any) => typeof u === 'string' && u.startsWith('turn:'));
+        });
+
+        console.log('[WebRTC] Loaded ICE servers from backend. TURN:', hasTurnServersRef.current);
+      }
+    } catch (err) {
+      console.warn('[WebRTC] Failed to load ICE servers (using STUN only):', err);
+    }
+  }, []);
+
+  const validateRoomCapacity = useCallback(async () => {
+    try {
+      const { data, error } = await (supabase.from('room_participants') as any)
+        .select('user_id')
+        .eq('room_id', roomId);
+
+      if (error) {
+        console.warn('[WebRTC] Participant check failed:', error.message);
+        return;
+      }
+
+      const count = Array.isArray(data) ? data.length : 0;
+      console.log('[WebRTC] Room participants:', count);
+
+      if (count > 2) {
+        setIsRemoteConnected(false);
+        setCallState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: 'Room has more than 2 participants. Please create a new room.',
+        }));
+      }
+    } catch (e) {
+      console.warn('[WebRTC] Participant check failed:', e);
+    }
+  }, [roomId]);
+
+  // Send signal with sequence number for ordering (broadcast-first, DB as fallback)
   const sendSignal = useCallback(async (signalType: string, signalData: Record<string, unknown>) => {
     if (!signalRateLimiter.canProceed()) {
       console.warn('[WebRTC] Signal rate limited');
@@ -112,43 +166,67 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
       ...(isWebRTCHandshake && callSessionIdRef.current ? { call_session_id: callSessionIdRef.current } : {}),
     };
 
-    try {
-      const startTime = performance.now();
-      await (supabase.from('call_signals') as any).insert({
-        room_id: roomId,
-        sender_id: participantId,
-        signal_type: signalType,
-        signal_data: enrichedSignalData,
-      });
+    // 1) Realtime broadcast (fast path)
+    const broadcastSignal: SignalPayload = {
+      id: `broadcast-${participantId}-${sequence}`,
+      created_at: new Date().toISOString(),
+      sender_id: participantId,
+      signal_type: signalType,
+      signal_data: enrichedSignalData as any,
+    };
 
-      const elapsed = performance.now() - startTime;
-      console.log(`[WebRTC] Signal ${signalType} sent in ${elapsed.toFixed(0)}ms (seq: ${sequence})`);
-
-      signalRateLimiter.recordOperation();
-      return true;
-    } catch (error) {
-      console.error('[WebRTC] Error sending signal:', error);
-      return false;
+    if (channelRef.current) {
+      void channelRef.current
+        .send({ type: 'broadcast', event: 'signal', payload: broadcastSignal })
+        .then((res) => console.log('[WebRTC] Broadcast sent:', signalType, res))
+        .catch((err) => console.warn('[WebRTC] Broadcast send failed:', err));
     }
+
+    // 2) Persist to DB in the background (reliability/backlog)
+    void (async () => {
+      try {
+        const start = performance.now();
+        await (supabase.from('call_signals') as any).insert({
+          room_id: roomId,
+          sender_id: participantId,
+          signal_type: signalType,
+          signal_data: enrichedSignalData,
+        });
+        console.log(`[WebRTC] Signal ${signalType} stored in ${(performance.now() - start).toFixed(0)}ms (seq: ${sequence})`);
+      } catch (error) {
+        console.error('[WebRTC] Error storing signal:', error);
+      }
+    })();
+
+    signalRateLimiter.recordOperation();
+    return true;
   }, [roomId, participantId]);
 
   // Create optimized peer connection
   const createPeerConnection = useCallback(() => {
     console.log('[WebRTC] Creating peer connection with optimized config');
-    
+
     const pc = new RTCPeerConnection({
-      iceServers: ICE_SERVERS,
+      iceServers: iceServersRef.current,
       iceCandidatePoolSize: 10,
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
     });
 
     // ICE candidate handling - send immediately (trickle ICE)
-    pc.onicecandidate = async (event) => {
+    pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log('[WebRTC] ICE candidate ready, sending immediately');
-        await sendSignal('ice-candidate', { candidate: event.candidate.toJSON() });
+        void sendSignal('ice-candidate', { candidate: event.candidate.toJSON() });
       }
+    };
+
+    pc.onicecandidateerror = (event) => {
+      console.warn('[WebRTC] ICE candidate error:', event);
+    };
+
+    pc.onnegotiationneeded = () => {
+      console.log('[WebRTC] negotiationneeded');
     };
 
     // ICE gathering state
@@ -258,6 +336,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
             const offer = await pc.createOffer({
               offerToReceiveAudio: true,
               offerToReceiveVideo: true,
+              iceRestart: hasTurnServersRef.current,
             });
             await pc.setLocalDescription(offer);
             await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
@@ -281,11 +360,22 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     // Ignore own signals
     if (signal.sender_id === participantId) return;
 
-    // Dedupe signals
-    if (signal.id && processedSignalIdsRef.current.has(signal.id)) {
-      return;
-    }
+    // Dedupe signals (works for DB rows + broadcast)
+    const s = signal.signal_data as any;
+    const key = [
+      signal.sender_id,
+      signal.signal_type,
+      s?.call_session_id ?? '',
+      s?.sequence ?? 'no-seq',
+      s?.timestamp ?? signal.created_at ?? '',
+    ].join('|');
+
+    if (processedSignalIdsRef.current.has(key)) return;
+    processedSignalIdsRef.current.add(key);
+
+    // Also track DB ids if present
     if (signal.id) {
+      if (processedSignalIdsRef.current.has(signal.id)) return;
       processedSignalIdsRef.current.add(signal.id);
     }
 
@@ -441,6 +531,10 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     const startTime = performance.now();
     console.log('[WebRTC] Starting call as initiator (fast path)');
 
+    // Non-blocking checks / config upgrades
+    void loadIceServers();
+    void validateRoomCapacity();
+
     // Set local stream immediately
     localStreamRef.current = localStream;
     setCallState({ status: 'connecting', localStream });
@@ -489,6 +583,10 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     const startTime = performance.now();
     console.log('[WebRTC] Joining call as responder (fast path)');
 
+    // Non-blocking checks / config upgrades
+    void loadIceServers();
+    void validateRoomCapacity();
+
     // Set local stream immediately
     localStreamRef.current = localStream;
     setCallState({ status: 'connecting', localStream });
@@ -526,7 +624,11 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
       try {
         makingOfferRef.current = true;
-        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+          iceRestart: hasTurnServersRef.current,
+        });
         await pc.setLocalDescription(offer);
         await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
         console.log(`[WebRTC] Fallback offer sent in ${(performance.now() - startTime).toFixed(0)}ms`);
@@ -589,7 +691,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     setIsRemoteConnected(false);
   }, [clearConnectionTimeout, clearOfferFallbackTimeout]);
 
-  // Subscribe to signals - optimized for speed
+  // Subscribe to signals - optimized for speed (broadcast + DB changes)
   useEffect(() => {
     if (!roomId || !participantId) return;
 
@@ -599,6 +701,26 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     const channel = supabase
       .channel(`room-${roomId}-${participantId}-${Date.now()}`) // Unique channel name
+      // Fast path: Realtime broadcast
+      .on('broadcast', { event: 'signal' }, (payload) => {
+        if (cancelled) return;
+        const signal = (payload as any).payload as SignalPayload;
+
+        const isHandshake =
+          signal.signal_type === 'offer' ||
+          signal.signal_type === 'answer' ||
+          signal.signal_type === 'ice-candidate';
+
+        if (isHandshake && !localStreamRef.current) {
+          console.log('[WebRTC] Queuing broadcast signal (local media not ready):', signal.signal_type);
+          pendingSignalsRef.current.push(signal);
+          return;
+        }
+
+        console.log('[WebRTC] Broadcast signal:', signal.signal_type);
+        void handleSignal(signal);
+      })
+      // Reliability/backlog: DB inserts
       .on(
         'postgres_changes',
         {
@@ -611,16 +733,19 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
           if (cancelled) return;
           const signal = payload.new as SignalPayload;
 
-          // If local media isn't ready yet, queue WebRTC handshake signals
-          const isHandshake = signal.signal_type === 'offer' || signal.signal_type === 'answer' || signal.signal_type === 'ice-candidate';
+          const isHandshake =
+            signal.signal_type === 'offer' ||
+            signal.signal_type === 'answer' ||
+            signal.signal_type === 'ice-candidate';
+
           if (isHandshake && !localStreamRef.current) {
-            console.log('[WebRTC] Queuing signal (local media not ready):', signal.signal_type);
+            console.log('[WebRTC] Queuing DB signal (local media not ready):', signal.signal_type);
             pendingSignalsRef.current.push(signal);
             return;
           }
 
-          console.log('[WebRTC] Realtime signal:', signal.signal_type);
-          handleSignal(signal);
+          console.log('[WebRTC] DB realtime signal:', signal.signal_type);
+          void handleSignal(signal);
         }
       )
       .subscribe((status) => {
@@ -633,15 +758,18 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     channelRef.current = channel;
 
-    // Fetch backlog immediately (don't wait for subscription)
+    // Fetch recent backlog immediately (limits stale session adoption)
     (async () => {
       try {
+        const since = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
         const { data, error } = await (supabase
           .from('call_signals') as any)
           .select('id,sender_id,signal_type,signal_data,created_at')
           .eq('room_id', roomId)
+          .gt('created_at', since)
           .order('created_at', { ascending: true })
-          .limit(30); // Reduced limit for speed
+          .limit(50);
 
         if (cancelled) return;
 
@@ -650,18 +778,39 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
           return;
         }
 
-        if (Array.isArray(data) && data.length > 0) {
-          console.log('[WebRTC] Processing', data.length, 'backlog signals');
+        if (!Array.isArray(data) || data.length === 0) return;
 
-          for (const row of data) {
-            const signal = row as SignalPayload;
-            const isHandshake = signal.signal_type === 'offer' || signal.signal_type === 'answer' || signal.signal_type === 'ice-candidate';
+        // If we haven't locked onto a session id yet, pick the most recent offer
+        if (!callSessionIdRef.current) {
+          const lastOffer = [...data]
+            .reverse()
+            .find((row: any) => row.signal_type === 'offer' && row.signal_data?.call_session_id);
 
-            if (isHandshake && !localStreamRef.current) {
-              pendingSignalsRef.current.push(signal);
-            } else {
-              await handleSignal(signal);
-            }
+          if (lastOffer?.signal_data?.call_session_id) {
+            callSessionIdRef.current = lastOffer.signal_data.call_session_id;
+            console.log('[WebRTC] Backlog selected call session id:', callSessionIdRef.current);
+          }
+        }
+
+        console.log('[WebRTC] Processing', data.length, 'recent backlog signals');
+
+        for (const row of data) {
+          const signal = row as SignalPayload;
+          const isHandshake =
+            signal.signal_type === 'offer' ||
+            signal.signal_type === 'answer' ||
+            signal.signal_type === 'ice-candidate';
+
+          // Drop stale handshake signals from other sessions
+          if (isHandshake && callSessionIdRef.current) {
+            const sid = (signal.signal_data as any)?.call_session_id;
+            if (sid && sid !== callSessionIdRef.current) continue;
+          }
+
+          if (isHandshake && !localStreamRef.current) {
+            pendingSignalsRef.current.push(signal);
+          } else {
+            await handleSignal(signal);
           }
         }
       } catch (err) {
