@@ -38,11 +38,13 @@ export function useCameraPreload(): UseCameraPreloadReturn {
       console.log('[CameraPreload] Requesting media devices...');
       const startTime = performance.now();
 
+      // Optimized media constraints for fast initialization
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
           facingMode: 'user',
+          frameRate: { ideal: 30 },
         },
         audio: {
           echoCancellation: true,
@@ -56,14 +58,14 @@ export function useCameraPreload(): UseCameraPreloadReturn {
 
       streamRef.current = mediaStream;
       setStream(mediaStream);
+      setIsLoading(false);
       return mediaStream;
     } catch (err) {
       console.error('[CameraPreload] Failed to get media:', err);
       const message = err instanceof Error ? err.message : 'Failed to access camera';
       setError(message);
-      return null;
-    } finally {
       setIsLoading(false);
+      return null;
     }
   }, [isLoading]);
 

@@ -3,20 +3,16 @@ import { supabase } from '@/integrations/supabase/client';
 import { CallState, GestureMessage } from '@/types/call';
 import { RateLimiter } from '@/lib/throttle';
 
-// Multiple STUN servers for redundancy and speed
+// Optimized STUN servers - prioritize fastest, most reliable
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
 ];
 
-// Timeouts for faster failure detection
-const CONNECTION_TIMEOUT_MS = 12000;
-const ICE_GATHERING_TIMEOUT_MS = 5000;
+// Aggressive timeouts for fast failure detection & recovery
+const CONNECTION_TIMEOUT_MS = 8000;
 const MAX_RETRY_ATTEMPTS = 2;
-const RETRY_DELAY_MS = 1500;
+const RETRY_DELAY_MS = 800;
 
 interface UseWebRTCOptions {
   roomId: string;
@@ -43,8 +39,8 @@ interface SignalPayload {
   };
 }
 
-// Rate limiter for signals
-const signalRateLimiter = new RateLimiter(100, 60 * 1000);
+// Rate limiter for signals - increased for faster signaling
+const signalRateLimiter = new RateLimiter(200, 60 * 1000);
 
 export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }: UseWebRTCOptions) {
   const [callState, setCallState] = useState<CallState>({ status: 'idle' });
@@ -440,10 +436,14 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     }
   }, [participantId, clearOfferFallbackTimeout, createPeerConnection, onGestureReceived, onTextReceived, sendSignal]);
 
-  // Start call as initiator (host)
+  // Start call as initiator (host) - optimized for speed
   const startCall = useCallback(async (localStream: MediaStream) => {
     const startTime = performance.now();
-    console.log('[WebRTC] Starting call as initiator');
+    console.log('[WebRTC] Starting call as initiator (fast path)');
+
+    // Set local stream immediately
+    localStreamRef.current = localStream;
+    setCallState({ status: 'connecting', localStream });
 
     // Fresh session id for this attempt
     callSessionIdRef.current = crypto.randomUUID();
@@ -453,64 +453,71 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     isInitiatorRef.current = true;
     retryCountRef.current = 0;
-    setCallState({ status: 'connecting', localStream });
-    localStreamRef.current = localStream;
 
-    // Wait briefly for subscription to be ready
-    if (!subscriptionReadyRef.current) {
-      console.log('[WebRTC] Waiting for subscription...');
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-
+    // Create peer connection immediately - no waiting
     const pc = createPeerConnection();
 
-    // Add tracks BEFORE offer
+    // Add tracks BEFORE offer (required for proper negotiation)
     localStream.getTracks().forEach(track => {
       console.log('[WebRTC] Adding track:', track.kind);
       pc.addTrack(track, localStream);
     });
 
+    // Start offer creation immediately (don't wait for subscription)
     try {
       makingOfferRef.current = true;
 
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
+        iceRestart: false,
       });
       await pc.setLocalDescription(offer);
 
       const elapsed = performance.now() - startTime;
       console.log(`[WebRTC] Offer created in ${elapsed.toFixed(0)}ms`);
 
+      // Send offer immediately
       await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
     } finally {
       makingOfferRef.current = false;
     }
   }, [clearOfferFallbackTimeout, createPeerConnection, sendSignal]);
 
-  // Join call as responder
+  // Join call as responder - optimized for speed
   const joinCall = useCallback(async (localStream: MediaStream) => {
-    console.log('[WebRTC] Joining call as responder');
+    const startTime = performance.now();
+    console.log('[WebRTC] Joining call as responder (fast path)');
+
+    // Set local stream immediately
+    localStreamRef.current = localStream;
+    setCallState({ status: 'connecting', localStream });
 
     isInitiatorRef.current = false;
     retryCountRef.current = 0;
-    setCallState({ status: 'connecting', localStream });
-    localStreamRef.current = localStream;
 
-    // If the initiator determination was wrong (or offer got lost), proactively start negotiation
-    // after a small deterministic delay. Glare is handled in handleSignal().
+    // Reset state
     clearOfferFallbackTimeout();
     hasReceivedOfferRef.current = false;
-    const last = participantId?.replace(/[^0-9a-f]/gi, '').slice(-1) || '0';
-    const nibble = Number.parseInt(last, 16);
-    const fallbackDelay = 1400 + (Number.isFinite(nibble) ? nibble * 40 : 0);
 
+    // Process pending signals immediately (may contain offer)
+    if (pendingSignalsRef.current.length > 0) {
+      console.log('[WebRTC] Processing', pendingSignalsRef.current.length, 'pending signals immediately');
+      const signalsToProcess = [...pendingSignalsRef.current];
+      pendingSignalsRef.current = [];
+      for (const signal of signalsToProcess) {
+        await handleSignal(signal);
+      }
+    }
+
+    // Fast fallback: if no offer received quickly, become initiator
+    const fallbackDelay = 600; // Much faster fallback
     offerFallbackTimeoutRef.current = window.setTimeout(async () => {
       if (hasReceivedOfferRef.current) return;
       if (!localStreamRef.current) return;
-      if (peerConnectionRef.current) return; // already negotiating
+      if (peerConnectionRef.current) return;
 
-      console.warn('[WebRTC] No offer received, starting fallback offer');
+      console.warn('[WebRTC] No offer received, initiating fallback offer');
       callSessionIdRef.current = crypto.randomUUID();
       pendingCandidatesRef.current = [];
 
@@ -522,20 +529,12 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
         await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
+        console.log(`[WebRTC] Fallback offer sent in ${(performance.now() - startTime).toFixed(0)}ms`);
       } finally {
         makingOfferRef.current = false;
       }
     }, fallbackDelay);
-
-    // Process any signals that arrived before we joined
-    if (pendingSignalsRef.current.length > 0) {
-      console.log('[WebRTC] Processing', pendingSignalsRef.current.length, 'pending signals');
-      for (const signal of pendingSignalsRef.current) {
-        await handleSignal(signal);
-      }
-      pendingSignalsRef.current = [];
-    }
-  }, [clearOfferFallbackTimeout, createPeerConnection, handleSignal, participantId, sendSignal]);
+  }, [clearOfferFallbackTimeout, createPeerConnection, handleSignal, sendSignal]);
 
   // Send gesture
   const sendGesture = useCallback(async (message: GestureMessage) => {
@@ -590,15 +589,16 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     setIsRemoteConnected(false);
   }, [clearConnectionTimeout, clearOfferFallbackTimeout]);
 
-  // Subscribe to signals
+  // Subscribe to signals - optimized for speed
   useEffect(() => {
     if (!roomId || !participantId) return;
 
+    const startTime = performance.now();
     console.log('[WebRTC] Setting up signal subscription for room:', roomId);
     let cancelled = false;
 
     const channel = supabase
-      .channel(`room-${roomId}-${participantId}`)
+      .channel(`room-${roomId}-${participantId}-${Date.now()}`) // Unique channel name
       .on(
         'postgres_changes',
         {
@@ -611,7 +611,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
           if (cancelled) return;
           const signal = payload.new as SignalPayload;
 
-          // If local media isn't ready yet, queue WebRTC handshake signals (prevents answering without tracks)
+          // If local media isn't ready yet, queue WebRTC handshake signals
           const isHandshake = signal.signal_type === 'offer' || signal.signal_type === 'answer' || signal.signal_type === 'ice-candidate';
           if (isHandshake && !localStreamRef.current) {
             console.log('[WebRTC] Queuing signal (local media not ready):', signal.signal_type);
@@ -624,7 +624,8 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
         }
       )
       .subscribe((status) => {
-        console.log('[WebRTC] Subscription status:', status);
+        const elapsed = performance.now() - startTime;
+        console.log(`[WebRTC] Subscription ${status} in ${elapsed.toFixed(0)}ms`);
         if (status === 'SUBSCRIBED') {
           subscriptionReadyRef.current = true;
         }
@@ -632,42 +633,39 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     channelRef.current = channel;
 
-    // Fetch backlog of signals (covers race where offer is sent before subscription is live)
+    // Fetch backlog immediately (don't wait for subscription)
     (async () => {
-      const { data, error } = await (supabase
-        .from('call_signals') as any)
-        .select('*')
-        .eq('room_id', roomId)
-        .order('created_at', { ascending: true })
-        .limit(50);
+      try {
+        const { data, error } = await (supabase
+          .from('call_signals') as any)
+          .select('id,sender_id,signal_type,signal_data,created_at')
+          .eq('room_id', roomId)
+          .order('created_at', { ascending: true })
+          .limit(30); // Reduced limit for speed
 
-      if (cancelled) return;
+        if (cancelled) return;
 
-      if (error) {
-        console.warn('[WebRTC] Backlog fetch error:', error.message);
-        return;
-      }
+        if (error) {
+          console.warn('[WebRTC] Backlog fetch error:', error.message);
+          return;
+        }
 
-      if (Array.isArray(data) && data.length > 0) {
-        console.log('[WebRTC] Processing', data.length, 'backlog signals');
+        if (Array.isArray(data) && data.length > 0) {
+          console.log('[WebRTC] Processing', data.length, 'backlog signals');
 
-        // Prefer server timestamp order; sequence is per-sender and not globally comparable.
-        const sorted = data.sort((a: any, b: any) => {
-          const tA = new Date(a.created_at || 0).getTime();
-          const tB = new Date(b.created_at || 0).getTime();
-          return tA - tB;
-        });
+          for (const row of data) {
+            const signal = row as SignalPayload;
+            const isHandshake = signal.signal_type === 'offer' || signal.signal_type === 'answer' || signal.signal_type === 'ice-candidate';
 
-        for (const row of sorted) {
-          const signal = row as SignalPayload;
-          const isHandshake = signal.signal_type === 'offer' || signal.signal_type === 'answer' || signal.signal_type === 'ice-candidate';
-
-          if (isHandshake && !localStreamRef.current) {
-            pendingSignalsRef.current.push(signal);
-          } else {
-            await handleSignal(signal);
+            if (isHandshake && !localStreamRef.current) {
+              pendingSignalsRef.current.push(signal);
+            } else {
+              await handleSignal(signal);
+            }
           }
         }
+      } catch (err) {
+        console.warn('[WebRTC] Backlog fetch failed:', err);
       }
     })();
 

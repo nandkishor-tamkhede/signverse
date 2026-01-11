@@ -120,8 +120,10 @@ export default function VideoCall() {
     }
   };
 
-  // Handle start call - use preloaded stream if available for instant start
+  // Handle start call - optimized for instant start
   const handleStartCall = async () => {
+    const startTime = performance.now();
+    
     try {
       const uid = await requireAuthUserId();
       if (!uid) {
@@ -134,9 +136,10 @@ export default function VideoCall() {
         return;
       }
 
-      const startTime = performance.now();
-      console.log('[VideoCall] Starting call...');
-      console.log('[VideoCall] roomId:', room.id, 'participantId:', participantId);
+      console.log('[VideoCall] Starting call (fast path)...');
+
+      // Transition to call UI immediately
+      setPhase('in-call');
 
       // Use preloaded stream if available, otherwise request new one
       let stream = preloadedStream;
@@ -144,14 +147,14 @@ export default function VideoCall() {
       if (!stream) {
         console.log('[VideoCall] No preloaded stream, requesting media...');
         stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+          audio: { echoCancellation: true, noiseSuppression: true },
         });
       } else {
-        console.log('[VideoCall] Using preloaded stream for instant start!');
+        console.log('[VideoCall] Using preloaded stream!');
       }
 
-      // Prefer room creator as initiator. If that ever mismatches, useWebRTC has glare handling + fallback.
+      // Start WebRTC immediately based on role
       if (room.created_by === uid) {
         await startCall(stream);
       } else {
@@ -159,12 +162,11 @@ export default function VideoCall() {
       }
 
       const elapsed = performance.now() - startTime;
-      console.log(`[VideoCall] Call started in ${elapsed.toFixed(0)}ms`);
-
-      setPhase('in-call');
+      console.log(`[VideoCall] Call initiated in ${elapsed.toFixed(0)}ms`);
     } catch (err) {
       console.error('Error accessing media devices:', err);
       toast.error('Failed to access camera or microphone');
+      setPhase('lobby');
     }
   };
 
