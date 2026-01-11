@@ -74,13 +74,6 @@ export type Database = {
             referencedRelation: "call_rooms"
             referencedColumns: ["id"]
           },
-          {
-            foreignKeyName: "call_signals_room_id_fkey"
-            columns: ["room_id"]
-            isOneToOne: false
-            referencedRelation: "public_rooms"
-            referencedColumns: ["id"]
-          },
         ]
       }
       room_participants: {
@@ -110,43 +103,23 @@ export type Database = {
             referencedRelation: "call_rooms"
             referencedColumns: ["id"]
           },
-          {
-            foreignKeyName: "room_participants_room_id_fkey"
-            columns: ["room_id"]
-            isOneToOne: false
-            referencedRelation: "public_rooms"
-            referencedColumns: ["id"]
-          },
         ]
       }
     }
     Views: {
-      public_rooms: {
-        Row: {
-          created_at: string | null
-          expires_at: string | null
-          id: string | null
-          is_active: boolean | null
-          room_code: string | null
-        }
-        Insert: {
-          created_at?: string | null
-          expires_at?: string | null
-          id?: string | null
-          is_active?: boolean | null
-          room_code?: string | null
-        }
-        Update: {
-          created_at?: string | null
-          expires_at?: string | null
-          id?: string | null
-          is_active?: boolean | null
-          room_code?: string | null
-        }
-        Relationships: []
-      }
+      [_ in never]: never
     }
     Functions: {
+      get_public_rooms: {
+        Args: never
+        Returns: {
+          created_at: string
+          expires_at: string
+          id: string
+          is_active: boolean
+          room_code: string
+        }[]
+      }
       is_room_participant: {
         Args: { room_id_param: string; user_id_param: string }
         Returns: boolean
