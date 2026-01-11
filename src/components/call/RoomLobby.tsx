@@ -5,7 +5,7 @@ import { UserRole, CallRoom } from '@/types/call';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
-import { MediaPermissionState, MediaError } from '@/hooks/useMediaPermission';
+import { CameraState, CameraError } from '@/hooks/useCameraStream';
 
 interface RoomLobbyProps {
   role: UserRole;
@@ -20,12 +20,12 @@ interface RoomLobbyProps {
   cameraStream?: MediaStream | null;
   isCameraReady?: boolean;
   isCameraLoading?: boolean;
-  cameraError?: MediaError | null;
-  cameraPermissionState?: MediaPermissionState;
+  cameraError?: CameraError | null;
+  cameraPermissionState?: CameraState;
   onPreloadCamera?: () => void;
 }
 
-const getErrorIcon = (permissionState?: MediaPermissionState) => {
+const getErrorIcon = (permissionState?: CameraState) => {
   switch (permissionState) {
     case 'denied':
       return <ShieldAlert className="w-8 h-8 text-destructive" />;

@@ -1,17 +1,20 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { MediaPermissionState, MediaError } from './useMediaPermission';
+import { CameraState, CameraError } from './useCameraStream';
 
 interface UseCameraPreloadReturn {
   stream: MediaStream | null;
   isReady: boolean;
   isLoading: boolean;
-  error: MediaError | null;
-  permissionState: MediaPermissionState;
+  error: CameraError | null;
+  permissionState: CameraState;
   preload: () => Promise<MediaStream | null>;
   release: () => void;
 }
 
-const ERROR_MESSAGES: Record<string, MediaError> = {
+const ERROR_CONFIG: Record<CameraState, CameraError | null> = {
+  idle: null,
+  requesting: null,
+  granted: null,
   denied: {
     type: 'denied',
     message: 'Camera and microphone access denied. Please enable permissions.',
@@ -56,17 +59,18 @@ const ERROR_MESSAGES: Record<string, MediaError> = {
 export function useCameraPreload(): UseCameraPreloadReturn {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<MediaError | null>(null);
-  const [permissionState, setPermissionState] = useState<MediaPermissionState>('idle');
+  const [error, setError] = useState<CameraError | null>(null);
+  const [permissionState, setPermissionState] = useState<CameraState>('idle');
   
   const streamRef = useRef<MediaStream | null>(null);
   const isRequestingRef = useRef(false);
+  const mountedRef = useRef(true);
 
-  const handleError = useCallback((err: unknown): MediaError => {
+  const handleError = useCallback((err: unknown): CameraError => {
     const error = err as Error & { name?: string };
     console.error('[CameraPreload] Error:', error.name, error.message);
 
-    let state: MediaPermissionState = 'denied';
+    let state: CameraState = 'denied';
     
     if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
       state = 'denied';
@@ -82,9 +86,10 @@ export function useCameraPreload(): UseCameraPreloadReturn {
 
     setPermissionState(state);
     
-    return ERROR_MESSAGES[state] || {
+    return ERROR_CONFIG[state] || {
       type: state,
       message: error.message || 'Failed to access camera',
+      instructions: ['Please check your camera and try again'],
     };
   }, []);
 
@@ -104,18 +109,22 @@ export function useCameraPreload(): UseCameraPreloadReturn {
     // Check for secure context
     if (typeof window !== 'undefined' && !window.isSecureContext) {
       if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        const err = ERROR_MESSAGES.insecure;
-        setError(err);
-        setPermissionState('insecure');
+        const err = ERROR_CONFIG.insecure!;
+        if (mountedRef.current) {
+          setError(err);
+          setPermissionState('insecure');
+        }
         return null;
       }
     }
 
     // Check for MediaDevices API
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const err = ERROR_MESSAGES.unsupported;
-      setError(err);
-      setPermissionState('unsupported');
+      const err = ERROR_CONFIG.unsupported!;
+      if (mountedRef.current) {
+        setError(err);
+        setPermissionState('unsupported');
+      }
       return null;
     }
 
@@ -148,16 +157,22 @@ export function useCameraPreload(): UseCameraPreloadReturn {
       console.log('[CameraPreload] Tracks:', mediaStream.getTracks().map(t => `${t.kind}: ${t.label}`).join(', '));
 
       streamRef.current = mediaStream;
-      setStream(mediaStream);
-      setIsLoading(false);
-      setPermissionState('granted');
+      
+      if (mountedRef.current) {
+        setStream(mediaStream);
+        setIsLoading(false);
+        setPermissionState('granted');
+      }
+      
       isRequestingRef.current = false;
       
       return mediaStream;
     } catch (err) {
       const mediaError = handleError(err);
-      setError(mediaError);
-      setIsLoading(false);
+      if (mountedRef.current) {
+        setError(mediaError);
+        setIsLoading(false);
+      }
       isRequestingRef.current = false;
       return null;
     }
@@ -175,14 +190,19 @@ export function useCameraPreload(): UseCameraPreloadReturn {
         }
       });
       streamRef.current = null;
-      setStream(null);
-      setPermissionState('idle');
+      if (mountedRef.current) {
+        setStream(null);
+        setPermissionState('idle');
+      }
     }
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
+    mountedRef.current = true;
+    
     return () => {
+      mountedRef.current = false;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => {
           try {
