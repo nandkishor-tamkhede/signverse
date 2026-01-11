@@ -362,13 +362,13 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
     // Dedupe signals (works for DB rows + broadcast)
     const s = signal.signal_data as any;
-    const key = [
-      signal.sender_id,
-      signal.signal_type,
-      s?.call_session_id ?? '',
-      s?.sequence ?? 'no-seq',
-      s?.timestamp ?? signal.created_at ?? '',
-    ].join('|');
+     const key = [
+       signal.sender_id,
+       signal.signal_type,
+       // Prefer stable identifiers so broadcast + DB copies dedupe correctly
+       s?.call_session_id ?? '',
+       s?.sequence ?? 'no-seq',
+     ].join('|');
 
     if (processedSignalIdsRef.current.has(key)) return;
     processedSignalIdsRef.current.add(key);
@@ -700,7 +700,8 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     let cancelled = false;
 
     const channel = supabase
-      .channel(`room-${roomId}-${participantId}-${Date.now()}`) // Unique channel name
+      // IMPORTANT: channel topic MUST be identical for both peers, otherwise broadcast signals are never delivered.
+      .channel(`call-room-${roomId}`)
       // Fast path: Realtime broadcast
       .on('broadcast', { event: 'signal' }, (payload) => {
         if (cancelled) return;
