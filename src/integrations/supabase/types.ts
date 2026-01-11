@@ -14,7 +14,68 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      call_rooms: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          expires_at: string
+          id: string
+          is_active: boolean
+          room_code: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          is_active?: boolean
+          room_code: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          expires_at?: string
+          id?: string
+          is_active?: boolean
+          room_code?: string
+        }
+        Relationships: []
+      }
+      call_signals: {
+        Row: {
+          created_at: string
+          id: string
+          room_id: string
+          sender_id: string
+          signal_data: Json
+          signal_type: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          room_id: string
+          sender_id: string
+          signal_data: Json
+          signal_type: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          room_id?: string
+          sender_id?: string
+          signal_data?: Json
+          signal_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "call_signals_room_id_fkey"
+            columns: ["room_id"]
+            isOneToOne: false
+            referencedRelation: "call_rooms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
