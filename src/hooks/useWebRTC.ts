@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { CallState, GestureMessage } from '@/types/call';
-import { v4 as uuidv4 } from 'uuid';
+import { RateLimiter } from '@/lib/throttle';
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -10,6 +10,7 @@ const ICE_SERVERS = [
 
 interface UseWebRTCOptions {
   roomId: string;
+  userId: string;
   onGestureReceived?: (message: GestureMessage) => void;
   onTextReceived?: (text: string) => void;
 }
@@ -29,15 +30,47 @@ interface SignalPayload {
   };
 }
 
-export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebRTCOptions) {
+// Rate limiter for signals: max 60 signals per minute (client-side)
+const signalRateLimiter = new RateLimiter(60, 60 * 1000);
+
+export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }: UseWebRTCOptions) {
   const [callState, setCallState] = useState<CallState>({ status: 'idle' });
   const [isRemoteConnected, setIsRemoteConnected] = useState(false);
   
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const participantIdRef = useRef<string>(uuidv4());
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // Use authenticated user ID instead of random UUID
+  const participantId = userId;
+
+  // Helper to send signal with rate limiting
+  const sendSignal = useCallback(async (signalType: string, signalData: Record<string, unknown>) => {
+    if (!signalRateLimiter.canProceed()) {
+      console.warn('[WebRTC] Signal rate limited');
+      return false;
+    }
+
+    try {
+      await (supabase.from('call_signals') as any).insert({
+        room_id: roomId,
+        sender_id: participantId,
+        signal_type: signalType,
+        signal_data: signalData,
+      });
+      signalRateLimiter.recordOperation();
+      return true;
+    } catch (error) {
+      // Handle rate limit error from database
+      if (error instanceof Error && error.message?.includes('Rate limit exceeded')) {
+        console.warn('[WebRTC] Database rate limit hit');
+      } else {
+        console.error('[WebRTC] Error sending signal:', error);
+      }
+      return false;
+    }
+  }, [roomId, participantId]);
 
   // Create peer connection
   const createPeerConnection = useCallback(() => {
@@ -47,12 +80,7 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     pc.onicecandidate = async (event) => {
       if (event.candidate) {
         console.log('[WebRTC] Sending ICE candidate');
-        await (supabase.from('call_signals') as any).insert({
-          room_id: roomId,
-          sender_id: participantIdRef.current,
-          signal_type: 'ice-candidate',
-          signal_data: { candidate: event.candidate.toJSON() },
-        });
+        await sendSignal('ice-candidate', { candidate: event.candidate.toJSON() });
       }
     };
 
@@ -75,11 +103,11 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
 
     peerConnectionRef.current = pc;
     return pc;
-  }, [roomId]);
+  }, [sendSignal]);
 
   // Handle incoming signals
   const handleSignal = useCallback(async (signal: SignalPayload) => {
-    if (signal.sender_id === participantIdRef.current) return;
+    if (signal.sender_id === participantId) return;
 
     const pc = peerConnectionRef.current;
     if (!pc && signal.signal_type !== 'offer') {
@@ -116,12 +144,7 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
           const answer = await newPc.createAnswer();
           await newPc.setLocalDescription(answer);
 
-          await (supabase.from('call_signals') as any).insert({
-            room_id: roomId,
-            sender_id: participantIdRef.current,
-            signal_type: 'answer',
-            signal_data: { type: answer.type, sdp: answer.sdp },
-          });
+          await sendSignal('answer', { type: answer.type, sdp: answer.sdp });
           break;
         }
 
@@ -183,7 +206,7 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     } catch (error) {
       console.error('[WebRTC] Error handling signal:', error);
     }
-  }, [roomId, createPeerConnection, onGestureReceived, onTextReceived]);
+  }, [participantId, createPeerConnection, onGestureReceived, onTextReceived, sendSignal]);
 
   // Start call as initiator
   const startCall = useCallback(async (localStream: MediaStream) => {
@@ -202,13 +225,8 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    await (supabase.from('call_signals') as any).insert({
-      room_id: roomId,
-      sender_id: participantIdRef.current,
-      signal_type: 'offer',
-      signal_data: { type: offer.type, sdp: offer.sdp },
-    });
-  }, [roomId, createPeerConnection]);
+    await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
+  }, [createPeerConnection, sendSignal]);
 
   // Join call as responder
   const joinCall = useCallback(async (localStream: MediaStream) => {
@@ -217,31 +235,21 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     localStreamRef.current = localStream;
   }, []);
 
-  // Send gesture to remote
+  // Send gesture to remote with rate limiting
   const sendGesture = useCallback(async (message: GestureMessage) => {
-    await (supabase.from('call_signals') as any).insert({
-      room_id: roomId,
-      sender_id: participantIdRef.current,
-      signal_type: 'gesture',
-      signal_data: {
-        gesture: message.gesture,
-        text: message.text,
-        hindiText: message.hindiText,
-        confidence: message.confidence,
-        timestamp: message.timestamp,
-      } as unknown as Record<string, unknown>,
+    await sendSignal('gesture', {
+      gesture: message.gesture,
+      text: message.text,
+      hindiText: message.hindiText,
+      confidence: message.confidence,
+      timestamp: message.timestamp,
     });
-  }, [roomId]);
+  }, [sendSignal]);
 
-  // Send text message
+  // Send text message with rate limiting
   const sendText = useCallback(async (text: string) => {
-    await (supabase.from('call_signals') as any).insert({
-      room_id: roomId,
-      sender_id: participantIdRef.current,
-      signal_type: 'text',
-      signal_data: { text },
-    });
-  }, [roomId]);
+    await sendSignal('text', { text });
+  }, [sendSignal]);
 
   // End call
   const endCall = useCallback(() => {
@@ -268,7 +276,7 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
 
   // Subscribe to signals
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || !participantId) return;
 
     console.log('[WebRTC] Subscribing to room signals:', roomId);
 
@@ -294,7 +302,7 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [roomId, handleSignal]);
+  }, [roomId, participantId, handleSignal]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -311,6 +319,6 @@ export function useWebRTC({ roomId, onGestureReceived, onTextReceived }: UseWebR
     endCall,
     sendGesture,
     sendText,
-    participantId: participantIdRef.current,
+    participantId,
   };
 }
