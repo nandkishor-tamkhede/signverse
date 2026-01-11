@@ -5,6 +5,12 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+interface IceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -12,7 +18,7 @@ serve(async (req) => {
 
   // Fast STUN-only default. TURN can be enabled by setting env vars:
   // TURN_URLS (comma separated), TURN_USERNAME, TURN_CREDENTIAL
-  const iceServers: RTCIceServer[] = [
+  const iceServers: IceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
   ];
