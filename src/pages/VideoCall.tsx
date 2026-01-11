@@ -30,6 +30,8 @@ export default function VideoCall() {
     stream: preloadedStream,
     isReady: isCameraReady,
     isLoading: isCameraLoading,
+    error: cameraError,
+    permissionState: cameraPermissionState,
     preload: preloadCamera,
     release: releaseCamera,
   } = useCameraPreload();
@@ -138,21 +140,48 @@ export default function VideoCall() {
 
       console.log('[VideoCall] Starting call (fast path)...');
 
-      // Transition to call UI immediately
-      setPhase('in-call');
-
       // Use preloaded stream if available, otherwise request new one
       let stream = preloadedStream;
 
-      if (!stream) {
+      if (!stream || !stream.active) {
         console.log('[VideoCall] No preloaded stream, requesting media...');
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-          audio: { echoCancellation: true, noiseSuppression: true },
-        });
+        
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { 
+              width: { ideal: 1280, max: 1920 }, 
+              height: { ideal: 720, max: 1080 }, 
+              facingMode: 'user',
+              frameRate: { ideal: 30 },
+            },
+            audio: { 
+              echoCancellation: true, 
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+        } catch (mediaErr) {
+          const err = mediaErr as Error & { name?: string };
+          console.error('[VideoCall] Media access error:', err.name, err.message);
+          
+          // Provide specific error messages
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            toast.error('Camera/microphone access denied. Please allow permissions in your browser settings.');
+          } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            toast.error('No camera or microphone found. Please connect a device.');
+          } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+            toast.error('Camera/microphone in use by another app. Please close other apps.');
+          } else {
+            toast.error('Failed to access camera or microphone. Please check your device.');
+          }
+          return;
+        }
       } else {
         console.log('[VideoCall] Using preloaded stream!');
       }
+
+      // Transition to call UI after getting stream
+      setPhase('in-call');
 
       // Start WebRTC immediately based on role
       if (room.created_by === uid) {
@@ -164,8 +193,8 @@ export default function VideoCall() {
       const elapsed = performance.now() - startTime;
       console.log(`[VideoCall] Call initiated in ${elapsed.toFixed(0)}ms`);
     } catch (err) {
-      console.error('Error accessing media devices:', err);
-      toast.error('Failed to access camera or microphone');
+      console.error('[VideoCall] Error starting call:', err);
+      toast.error('Failed to start call. Please try again.');
       setPhase('lobby');
     }
   };
@@ -254,6 +283,8 @@ export default function VideoCall() {
             cameraStream={preloadedStream}
             isCameraReady={isCameraReady}
             isCameraLoading={isCameraLoading}
+            cameraError={cameraError}
+            cameraPermissionState={cameraPermissionState}
             onPreloadCamera={preloadCamera}
           />
         )}

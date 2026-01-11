@@ -1,8 +1,12 @@
 import { motion } from 'framer-motion';
-import { Camera, CameraOff, Loader2, ShieldAlert, MonitorX, Lock, AlertTriangle } from 'lucide-react';
+import { Camera, CameraOff, Loader2, ShieldAlert, MonitorX, Lock, AlertTriangle, Mic } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { RefObject } from 'react';
 import { CameraPermissionState } from '@/hooks/useCameraPermission';
+import { MediaPermissionState } from '@/hooks/useMediaPermission';
+
+// Support both legacy CameraPermissionState and new MediaPermissionState
+type PermissionState = CameraPermissionState | MediaPermissionState;
 
 interface WebcamPreviewProps {
   videoRef: RefObject<HTMLVideoElement>;
@@ -10,10 +14,11 @@ interface WebcamPreviewProps {
   isActive: boolean;
   isLoading: boolean;
   error: string | null;
-  permissionState?: CameraPermissionState;
+  permissionState?: PermissionState;
+  showMicStatus?: boolean;
 }
 
-const getErrorIcon = (permissionState?: CameraPermissionState) => {
+const getErrorIcon = (permissionState?: PermissionState) => {
   switch (permissionState) {
     case 'denied':
       return <ShieldAlert className="w-16 h-16 text-destructive mb-4" />;
@@ -30,7 +35,7 @@ const getErrorIcon = (permissionState?: CameraPermissionState) => {
   }
 };
 
-const getPermissionInstructions = (permissionState?: CameraPermissionState) => {
+const getPermissionInstructions = (permissionState?: PermissionState) => {
   switch (permissionState) {
     case 'denied':
       return (

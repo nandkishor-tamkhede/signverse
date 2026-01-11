@@ -1,13 +1,53 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { MediaPermissionState, MediaError } from './useMediaPermission';
 
 interface UseCameraPreloadReturn {
   stream: MediaStream | null;
   isReady: boolean;
   isLoading: boolean;
-  error: string | null;
+  error: MediaError | null;
+  permissionState: MediaPermissionState;
   preload: () => Promise<MediaStream | null>;
   release: () => void;
 }
+
+const ERROR_MESSAGES: Record<string, MediaError> = {
+  denied: {
+    type: 'denied',
+    message: 'Camera and microphone access denied. Please enable permissions.',
+    instructions: [
+      'Click the camera/lock icon in your browser address bar',
+      'Select "Allow" for camera and microphone access',
+      'Refresh this page',
+    ],
+  },
+  'not-found': {
+    type: 'not-found',
+    message: 'No camera or microphone found.',
+    instructions: [
+      'Connect a webcam or camera to your device',
+      'Check if your devices are enabled in system settings',
+    ],
+  },
+  'in-use': {
+    type: 'in-use',
+    message: 'Camera or microphone is in use by another application.',
+    instructions: [
+      'Close other apps using the camera (Zoom, Teams, etc.)',
+      'Close other browser tabs with camera access',
+    ],
+  },
+  unsupported: {
+    type: 'unsupported',
+    message: 'Your browser does not support camera or microphone access.',
+    instructions: ['Use Chrome, Edge, Firefox, or Safari'],
+  },
+  insecure: {
+    type: 'insecure',
+    message: 'Camera access requires a secure connection (HTTPS).',
+    instructions: ['Access this site via https://', 'Or use localhost for development'],
+  },
+};
 
 /**
  * Preloads camera and microphone to reduce call join latency.
@@ -16,23 +56,73 @@ interface UseCameraPreloadReturn {
 export function useCameraPreload(): UseCameraPreloadReturn {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<MediaError | null>(null);
+  const [permissionState, setPermissionState] = useState<MediaPermissionState>('idle');
+  
   const streamRef = useRef<MediaStream | null>(null);
+  const isRequestingRef = useRef(false);
+
+  const handleError = useCallback((err: unknown): MediaError => {
+    const error = err as Error & { name?: string };
+    console.error('[CameraPreload] Error:', error.name, error.message);
+
+    let state: MediaPermissionState = 'denied';
+    
+    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+      state = 'denied';
+    } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+      state = 'not-found';
+    } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+      state = 'in-use';
+    } else if (error.name === 'OverconstrainedError') {
+      state = 'not-found';
+    } else if (error.name === 'TypeError') {
+      state = 'unsupported';
+    }
+
+    setPermissionState(state);
+    
+    return ERROR_MESSAGES[state] || {
+      type: state,
+      message: error.message || 'Failed to access camera',
+    };
+  }, []);
 
   const preload = useCallback(async (): Promise<MediaStream | null> => {
     // Already have a stream
-    if (streamRef.current) {
+    if (streamRef.current && streamRef.current.active) {
       console.log('[CameraPreload] Using cached stream');
       return streamRef.current;
     }
 
-    if (isLoading) {
+    // Prevent concurrent requests
+    if (isRequestingRef.current) {
       console.log('[CameraPreload] Already loading...');
       return null;
     }
 
+    // Check for secure context
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        const err = ERROR_MESSAGES.insecure;
+        setError(err);
+        setPermissionState('insecure');
+        return null;
+      }
+    }
+
+    // Check for MediaDevices API
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const err = ERROR_MESSAGES.unsupported;
+      setError(err);
+      setPermissionState('unsupported');
+      return null;
+    }
+
+    isRequestingRef.current = true;
     setIsLoading(true);
     setError(null);
+    setPermissionState('requesting');
 
     try {
       console.log('[CameraPreload] Requesting media devices...');
@@ -55,41 +145,63 @@ export function useCameraPreload(): UseCameraPreloadReturn {
 
       const elapsed = performance.now() - startTime;
       console.log(`[CameraPreload] Media ready in ${elapsed.toFixed(0)}ms`);
+      console.log('[CameraPreload] Tracks:', mediaStream.getTracks().map(t => `${t.kind}: ${t.label}`).join(', '));
 
       streamRef.current = mediaStream;
       setStream(mediaStream);
       setIsLoading(false);
+      setPermissionState('granted');
+      isRequestingRef.current = false;
+      
       return mediaStream;
     } catch (err) {
-      console.error('[CameraPreload] Failed to get media:', err);
-      const message = err instanceof Error ? err.message : 'Failed to access camera';
-      setError(message);
+      const mediaError = handleError(err);
+      setError(mediaError);
       setIsLoading(false);
+      isRequestingRef.current = false;
       return null;
     }
-  }, [isLoading]);
+  }, [handleError]);
 
   const release = useCallback(() => {
     if (streamRef.current) {
       console.log('[CameraPreload] Releasing stream');
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach(track => {
+        try {
+          track.stop();
+          console.log('[CameraPreload] Stopped track:', track.kind);
+        } catch {
+          // ignore
+        }
+      });
       streamRef.current = null;
       setStream(null);
+      setPermissionState('idle');
     }
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      // Don't release on unmount - let the caller control this
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => {
+          try {
+            track.stop();
+          } catch {
+            // ignore
+          }
+        });
+        streamRef.current = null;
+      }
     };
   }, []);
 
   return {
     stream,
-    isReady: !!stream,
+    isReady: !!stream && stream.active,
     isLoading,
     error,
+    permissionState,
     preload,
     release,
   };
