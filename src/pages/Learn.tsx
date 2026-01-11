@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, GraduationCap } from 'lucide-react';
+import { ArrowLeft, GraduationCap, Loader2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AnimatedBackground } from '@/components/AnimatedBackground';
 import { LevelCard } from '@/components/learning/LevelCard';
@@ -13,19 +13,25 @@ import { useLearningProgress } from '@/hooks/useLearningProgress';
 import { useMediaPipeHands } from '@/hooks/useMediaPipeHands';
 import { LearningLevel, LessonGesture } from '@/types/learning';
 import { GestureClassificationResult } from '@/types/gesture';
+import { useAnonymousAuth } from '@/hooks/useAnonymousAuth';
+import { toast } from 'sonner';
 
 const Learn = () => {
   const [selectedLevel, setSelectedLevel] = useState<LearningLevel | null>(null);
   const [selectedGesture, setSelectedGesture] = useState<LessonGesture | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [detectedGesture, setDetectedGesture] = useState<GestureClassificationResult | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  const { isAuthenticated, isLoading: authLoading } = useAnonymousAuth();
 
   const { 
     getLevelProgress, 
     getGestureProgress, 
     getTotalProgress, 
     updateGestureProgress,
-    isLoading 
+    loadProgress,
+    isLoading: progressLoading 
   } = useLearningProgress();
 
   const handleGestureDetected = useCallback((result: GestureClassificationResult) => {
@@ -40,12 +46,23 @@ const Learn = () => {
   const totalProgress = getTotalProgress();
   const levelsCompleted = LEARNING_LEVELS.filter(level => {
     const progress = getLevelProgress(level.id);
-    return progress?.gesturesCompleted === progress?.totalGestures;
+    return progress?.gesturesCompleted === progress?.totalGestures && progress?.totalGestures > 0;
   }).length;
 
   const handlePracticeComplete = useCallback(async (accuracy: number, passed: boolean) => {
     if (selectedLevel && selectedGesture) {
-      await updateGestureProgress(selectedLevel.id, selectedGesture.id, accuracy, passed);
+      setIsUpdating(true);
+      try {
+        await updateGestureProgress(selectedLevel.id, selectedGesture.id, accuracy, passed);
+        if (passed) {
+          toast.success('Great job! Progress saved 🎉');
+        }
+      } catch (error) {
+        console.error('Failed to save progress:', error);
+        toast.error('Could not save progress. Please try again.');
+      } finally {
+        setIsUpdating(false);
+      }
     }
   }, [selectedLevel, selectedGesture, updateGestureProgress]);
 
@@ -54,27 +71,65 @@ const Learn = () => {
     setIsCameraActive(false);
   }, []);
 
+  const handleRefresh = useCallback(async () => {
+    try {
+      await loadProgress();
+      toast.success('Progress refreshed');
+    } catch {
+      toast.error('Failed to refresh progress');
+    }
+  }, [loadProgress]);
+
+  // Show loading state
+  if (authLoading || progressLoading) {
+    return (
+      <div className="min-h-screen relative">
+        <AnimatedBackground />
+        <div className="relative z-10 flex items-center justify-center min-h-screen">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="text-center"
+          >
+            <Loader2 className="w-12 h-12 animate-spin text-primary mx-auto mb-4" />
+            <p className="text-muted-foreground">Loading your learning journey...</p>
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen relative">
       <AnimatedBackground />
       
       <div className="relative z-10 container mx-auto px-4 py-8">
         {/* Header */}
-        <div className="flex items-center gap-4 mb-8">
-          <Link to="/">
-            <Button variant="ghost" size="icon">
-              <ArrowLeft className="w-5 h-5" />
-            </Button>
-          </Link>
-          <div className="flex items-center gap-3">
-            <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-secondary">
-              <GraduationCap className="w-8 h-8 text-white" />
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold">Learn Sign Language</h1>
-              <p className="text-muted-foreground">AI-powered interactive lessons</p>
+        <div className="flex items-center justify-between mb-8">
+          <div className="flex items-center gap-4">
+            <Link to="/">
+              <Button variant="ghost" size="icon">
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+            </Link>
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-secondary">
+                <GraduationCap className="w-8 h-8 text-white" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold">Learn Sign Language</h1>
+                <p className="text-muted-foreground">AI-powered interactive lessons</p>
+              </div>
             </div>
           </div>
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            onClick={handleRefresh}
+            disabled={progressLoading}
+          >
+            <RefreshCw className={`w-5 h-5 ${progressLoading ? 'animate-spin' : ''}`} />
+          </Button>
         </div>
 
         {/* Progress Overview */}
