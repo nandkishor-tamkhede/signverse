@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Copy, ArrowLeft, Users, Plus, LogIn, Check, Video, Camera, Loader2 } from 'lucide-react';
+import { Copy, ArrowLeft, Users, Plus, LogIn, Check, Video, Camera, Loader2, ShieldAlert, MonitorX, Lock, AlertTriangle, CameraOff, RefreshCw } from 'lucide-react';
 import { UserRole, CallRoom } from '@/types/call';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
+import { MediaPermissionState, MediaError } from '@/hooks/useMediaPermission';
 
 interface RoomLobbyProps {
   role: UserRole;
@@ -15,12 +16,31 @@ interface RoomLobbyProps {
   onCreateRoom: () => Promise<void>;
   onJoinRoom: (code: string) => Promise<void>;
   onStartCall: () => void;
-  // New props for camera preloading
+  // Camera preloading props
   cameraStream?: MediaStream | null;
   isCameraReady?: boolean;
   isCameraLoading?: boolean;
+  cameraError?: MediaError | null;
+  cameraPermissionState?: MediaPermissionState;
   onPreloadCamera?: () => void;
 }
+
+const getErrorIcon = (permissionState?: MediaPermissionState) => {
+  switch (permissionState) {
+    case 'denied':
+      return <ShieldAlert className="w-8 h-8 text-destructive" />;
+    case 'not-found':
+      return <MonitorX className="w-8 h-8 text-destructive" />;
+    case 'insecure':
+      return <Lock className="w-8 h-8 text-destructive" />;
+    case 'unsupported':
+      return <AlertTriangle className="w-8 h-8 text-destructive" />;
+    case 'in-use':
+      return <CameraOff className="w-8 h-8 text-destructive" />;
+    default:
+      return <CameraOff className="w-8 h-8 text-destructive" />;
+  }
+};
 
 export function RoomLobby({
   role,
@@ -34,6 +54,8 @@ export function RoomLobby({
   cameraStream,
   isCameraReady = false,
   isCameraLoading = false,
+  cameraError,
+  cameraPermissionState,
   onPreloadCamera,
 }: RoomLobbyProps) {
   const [roomCode, setRoomCode] = useState('');
@@ -42,11 +64,11 @@ export function RoomLobby({
 
   // Preload camera when entering lobby
   useEffect(() => {
-    if (onPreloadCamera && !isCameraReady && !isCameraLoading) {
+    if (onPreloadCamera && !isCameraReady && !isCameraLoading && !cameraError) {
       console.log('[RoomLobby] Preloading camera...');
       onPreloadCamera();
     }
-  }, [onPreloadCamera, isCameraReady, isCameraLoading]);
+  }, [onPreloadCamera, isCameraReady, isCameraLoading, cameraError]);
 
   const copyRoomCode = () => {
     if (room) {
@@ -140,25 +162,58 @@ export function RoomLobby({
                 </div>
               )}
 
+              {/* Camera error state */}
+              {cameraError && (
+                <div className="bg-destructive/10 border border-destructive/30 rounded-xl p-4 mb-4">
+                  <div className="flex items-start gap-3">
+                    {getErrorIcon(cameraPermissionState)}
+                    <div className="flex-1">
+                      <p className="text-destructive font-medium text-sm mb-2">{cameraError.message}</p>
+                      {cameraError.instructions && (
+                        <ul className="text-xs text-muted-foreground space-y-1">
+                          {cameraError.instructions.map((instruction, idx) => (
+                            <li key={idx} className="flex items-start gap-2">
+                              <span className="text-muted-foreground">•</span>
+                              <span>{instruction}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={onPreloadCamera}
+                        className="mt-3"
+                      >
+                        <RefreshCw className="w-3 h-3 mr-2" />
+                        Try Again
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Camera status */}
-              <div className="flex items-center justify-center gap-2 mb-4">
-                {isCameraLoading ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">Preparing camera...</span>
-                  </>
-                ) : isCameraReady ? (
-                  <>
-                    <Camera className="w-4 h-4 text-green-500" />
-                    <span className="text-sm text-green-500">Camera ready</span>
-                  </>
-                ) : (
-                  <>
-                    <Camera className="w-4 h-4 text-muted-foreground" />
-                    <span className="text-sm text-muted-foreground">Camera will start when you join</span>
-                  </>
-                )}
-              </div>
+              {!cameraError && (
+                <div className="flex items-center justify-center gap-2 mb-4">
+                  {isCameraLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                      <span className="text-sm text-muted-foreground">Preparing camera & microphone...</span>
+                    </>
+                  ) : isCameraReady ? (
+                    <>
+                      <Camera className="w-4 h-4 text-green-500" />
+                      <span className="text-sm text-green-500">Camera & microphone ready</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-sm text-muted-foreground">Camera will start when you join</span>
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Actions */}
               <div className="space-y-3">

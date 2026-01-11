@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 export type CameraPermissionState =
   | 'idle'
@@ -19,6 +19,10 @@ interface UseCameraPermissionReturn {
    */
   requestPermission: (videoConstraints?: MediaTrackConstraints) => Promise<MediaStream | null>;
   checkPermission: () => Promise<void>;
+  /**
+   * Releases the current stream if one was obtained.
+   */
+  releaseStream: () => void;
 }
 
 const ERROR_MESSAGES: Record<CameraPermissionState, string | null> = {
@@ -39,6 +43,9 @@ const ERROR_MESSAGES: Record<CameraPermissionState, string | null> = {
 export function useCameraPermission(): UseCameraPermissionReturn {
   const [permissionState, setPermissionState] = useState<CameraPermissionState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  const streamRef = useRef<MediaStream | null>(null);
+  const isRequestingRef = useRef(false);
 
   // Check if browser supports MediaDevices
   const checkBrowserSupport = useCallback((): boolean => {
@@ -94,6 +101,21 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     }
   }, []);
 
+  // Release current stream
+  const releaseStream = useCallback(() => {
+    if (streamRef.current) {
+      console.log('[Camera] Releasing stream...');
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      });
+      streamRef.current = null;
+    }
+  }, []);
+
   // Check current permission status
   const checkPermission = useCallback(async () => {
     if (!checkBrowserSupport()) return;
@@ -139,18 +161,35 @@ export function useCameraPermission(): UseCameraPermissionReturn {
   // Request camera permission AND return a live stream when granted.
   const requestPermission = useCallback(
     async (videoConstraints?: MediaTrackConstraints): Promise<MediaStream | null> => {
+      // Prevent concurrent requests
+      if (isRequestingRef.current) {
+        console.log('[Camera] Already requesting, ignoring...');
+        return streamRef.current;
+      }
+
+      // If we already have an active stream, return it
+      if (streamRef.current && streamRef.current.active) {
+        console.log('[Camera] Using existing active stream');
+        setPermissionState('granted');
+        setErrorMessage(null);
+        return streamRef.current;
+      }
+
       if (!checkBrowserSupport()) return null;
 
+      isRequestingRef.current = true;
       setPermissionState('requesting');
       setErrorMessage(null);
 
       try {
         console.log('[Camera] Requesting camera access...');
+        const startTime = performance.now();
 
         const defaultConstraints: MediaTrackConstraints = {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          width: { ideal: 640, max: 1920 },
+          height: { ideal: 480, max: 1080 },
           facingMode: 'user',
+          frameRate: { ideal: 30, max: 60 },
         };
 
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -158,17 +197,25 @@ export function useCameraPermission(): UseCameraPermissionReturn {
           audio: false,
         });
 
+        const elapsed = performance.now() - startTime;
+        console.log(`[Camera] Permission granted in ${elapsed.toFixed(0)}ms`);
+
+        // Release any old stream before storing new one
+        releaseStream();
+        
+        streamRef.current = stream;
         setPermissionState('granted');
         setErrorMessage(null);
-        console.log('[Camera] Permission granted');
+        isRequestingRef.current = false;
 
         return stream;
       } catch (error) {
         handleError(error);
+        isRequestingRef.current = false;
         return null;
       }
     },
-    [checkBrowserSupport, handleError]
+    [checkBrowserSupport, handleError, releaseStream]
   );
 
   // Check permission on mount
@@ -176,10 +223,27 @@ export function useCameraPermission(): UseCameraPermissionReturn {
     checkPermission();
   }, [checkPermission]);
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // ignore
+          }
+        });
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
   return {
     permissionState,
     errorMessage,
     requestPermission,
     checkPermission,
+    releaseStream,
   };
 }
