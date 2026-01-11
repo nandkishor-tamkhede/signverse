@@ -242,7 +242,14 @@ export function CallInterface({
   }, []);
 
   // Connection status
-  const connectionStatus = isRemoteConnected ? 'connected' : callState.status === 'connecting' ? 'connecting' : 'waiting';
+  const connectionStatus =
+    callState.status === 'error'
+      ? 'error'
+      : isRemoteConnected
+        ? 'connected'
+        : callState.status === 'connecting'
+          ? 'connecting'
+          : 'waiting';
 
   return (
     <div 
@@ -273,16 +280,28 @@ export function CallInterface({
                 <div className="flex items-center justify-center gap-2 mb-2">
                   {connectionStatus === 'connecting' ? (
                     <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                  ) : connectionStatus === 'error' ? (
+                    <div className="w-2 h-2 rounded-full bg-destructive" />
                   ) : (
                     <div className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
                   )}
                   <span className="text-lg">
-                    {connectionStatus === 'connecting' ? 'Connecting...' : 'Waiting for participant...'}
+                    {connectionStatus === 'connecting'
+                      ? 'Connecting...'
+                      : connectionStatus === 'error'
+                        ? 'Connection failed'
+                        : 'Waiting for participant...'}
                   </span>
                 </div>
-                <p className="text-muted-foreground text-sm">
-                  Room: <span className="font-mono">{room.room_code}</span>
-                </p>
+                {connectionStatus === 'error' && callState.error ? (
+                  <p className="text-destructive text-sm max-w-md mx-auto">
+                    {callState.error}
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground text-sm">
+                    Room: <span className="font-mono">{room.room_code}</span>
+                  </p>
+                )}
               </motion.div>
             </div>
           )}

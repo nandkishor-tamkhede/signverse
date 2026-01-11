@@ -16,6 +16,8 @@ interface UseWebRTCOptions {
 }
 
 interface SignalPayload {
+  id?: string;
+  created_at?: string;
   sender_id: string;
   signal_type: string;
   signal_data: {
@@ -36,11 +38,13 @@ const signalRateLimiter = new RateLimiter(60, 60 * 1000);
 export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }: UseWebRTCOptions) {
   const [callState, setCallState] = useState<CallState>({ status: 'idle' });
   const [isRemoteConnected, setIsRemoteConnected] = useState(false);
-  
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  const processedSignalIdsRef = useRef<Set<string>>(new Set());
+  const connectTimeoutRef = useRef<number | null>(null);
 
   // Use authenticated user ID instead of random UUID
   const participantId = userId;
@@ -84,21 +88,40 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
       }
     };
 
+    pc.onsignalingstatechange = () => {
+      console.log('[WebRTC] Signaling state:', pc.signalingState);
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log('[WebRTC] Connection state:', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        setCallState((prev) => ({ ...prev, status: 'connected' }));
+      }
+      if (pc.connectionState === 'failed') {
+        setIsRemoteConnected(false);
+        setCallState((prev) => ({ ...prev, status: 'error', error: 'Connection failed. Please try again.' }));
+      }
+    };
+
     pc.oniceconnectionstatechange = () => {
       console.log('[WebRTC] ICE connection state:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         setIsRemoteConnected(true);
-        setCallState(prev => ({ ...prev, status: 'connected' }));
-      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        setCallState((prev) => ({ ...prev, status: 'connected' }));
+      } else if (pc.iceConnectionState === 'disconnected') {
         setIsRemoteConnected(false);
-        setCallState(prev => ({ ...prev, status: 'disconnected' }));
+        setCallState((prev) => ({ ...prev, status: 'disconnected' }));
+      } else if (pc.iceConnectionState === 'failed') {
+        console.error('[WebRTC] ICE failed (likely NAT/TURN issue or signaling).');
+        setIsRemoteConnected(false);
+        setCallState((prev) => ({ ...prev, status: 'error', error: 'ICE negotiation failed. Try again or switch networks.' }));
       }
     };
 
     pc.ontrack = (event) => {
       console.log('[WebRTC] Remote track received');
       const [remoteStream] = event.streams;
-      setCallState(prev => ({ ...prev, remoteStream }));
+      setCallState((prev) => ({ ...prev, remoteStream }));
     };
 
     peerConnectionRef.current = pc;
@@ -108,6 +131,12 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   // Handle incoming signals
   const handleSignal = useCallback(async (signal: SignalPayload) => {
     if (signal.sender_id === participantId) return;
+
+    // Dedupe: subscription + backlog fetch can deliver the same signal
+    if (signal.id) {
+      if (processedSignalIdsRef.current.has(signal.id)) return;
+      processedSignalIdsRef.current.add(signal.id);
+    }
 
     const pc = peerConnectionRef.current;
     if (!pc && signal.signal_type !== 'offer') {
@@ -254,14 +283,22 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   // End call
   const endCall = useCallback(() => {
     console.log('[WebRTC] Ending call');
-    
+
+    if (connectTimeoutRef.current) {
+      window.clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+
+    pendingCandidatesRef.current = [];
+    processedSignalIdsRef.current = new Set();
+
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
     }
 
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
     }
 
@@ -274,11 +311,13 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     setIsRemoteConnected(false);
   }, []);
 
-  // Subscribe to signals
+  // Subscribe to signals (and also fetch backlog so we don't miss the offer)
   useEffect(() => {
     if (!roomId || !participantId) return;
 
     console.log('[WebRTC] Subscribing to room signals:', roomId);
+
+    let cancelled = false;
 
     const channel = supabase
       .channel(`room-${roomId}`)
@@ -292,17 +331,71 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
         },
         (payload) => {
           const signal = payload.new as SignalPayload;
+          console.log('[WebRTC] Signal received via realtime:', signal.signal_type);
           handleSignal(signal);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('[WebRTC] Realtime subscription status:', status);
+      });
 
     channelRef.current = channel;
 
+    // Fetch recent signals so a late joiner doesn't miss the offer
+    (async () => {
+      const { data, error } = await (supabase
+        .from('call_signals') as any)
+        .select('*')
+        .eq('room_id', roomId)
+        .order('created_at', { ascending: true })
+        .limit(100);
+
+      if (cancelled) return;
+
+      if (error) {
+        console.warn('[WebRTC] Failed to fetch signal backlog:', error.message);
+        return;
+      }
+
+      if (Array.isArray(data) && data.length) {
+        console.log('[WebRTC] Processing signal backlog:', data.length);
+        for (const row of data) {
+          await handleSignal(row as SignalPayload);
+        }
+      }
+    })();
+
     return () => {
+      cancelled = true;
       supabase.removeChannel(channel);
     };
   }, [roomId, participantId, handleSignal]);
+
+  // Connecting watchdog: never stay stuck forever
+  useEffect(() => {
+    if (callState.status !== 'connecting') return;
+    if (isRemoteConnected) return;
+
+    if (connectTimeoutRef.current) {
+      window.clearTimeout(connectTimeoutRef.current);
+    }
+
+    connectTimeoutRef.current = window.setTimeout(() => {
+      console.error('[WebRTC] Connection timed out');
+      setCallState((prev) => ({
+        ...prev,
+        status: 'error',
+        error: 'Connection timed out. Check the room code and try again.',
+      }));
+    }, 25000);
+
+    return () => {
+      if (connectTimeoutRef.current) {
+        window.clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
+    };
+  }, [callState.status, isRemoteConnected]);
 
   // Cleanup on unmount
   useEffect(() => {

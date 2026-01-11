@@ -102,15 +102,11 @@ export default function VideoCall() {
         audio: true,
       });
 
-      // Check if this is the first participant (creator) or second (joiner)
+      // Host (room creator) is the offerer. Joiner must NOT create an offer (prevents glare).
       if (room?.created_by === user?.id) {
         await startCall(stream);
       } else {
         await joinCall(stream);
-        // Wait a bit then send offer request
-        setTimeout(async () => {
-          await startCall(stream);
-        }, 1000);
       }
 
       setPhase('in-call');
