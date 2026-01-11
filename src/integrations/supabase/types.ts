@@ -105,6 +105,84 @@ export type Database = {
           },
         ]
       }
+      user_learning_progress: {
+        Row: {
+          accuracy_score: number | null
+          attempts: number
+          best_accuracy: number | null
+          completed: boolean
+          created_at: string
+          gesture_id: string
+          id: string
+          last_practiced_at: string | null
+          level_id: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          accuracy_score?: number | null
+          attempts?: number
+          best_accuracy?: number | null
+          completed?: boolean
+          created_at?: string
+          gesture_id: string
+          id?: string
+          last_practiced_at?: string | null
+          level_id: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          accuracy_score?: number | null
+          attempts?: number
+          best_accuracy?: number | null
+          completed?: boolean
+          created_at?: string
+          gesture_id?: string
+          id?: string
+          last_practiced_at?: string | null
+          level_id?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_level_progress: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          gestures_completed: number
+          id: string
+          is_unlocked: boolean
+          level_id: number
+          total_gestures: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          gestures_completed?: number
+          id?: string
+          is_unlocked?: boolean
+          level_id: number
+          total_gestures: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          gestures_completed?: number
+          id?: string
+          is_unlocked?: boolean
+          level_id?: number
+          total_gestures?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
