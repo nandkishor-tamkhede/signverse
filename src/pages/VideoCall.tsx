@@ -7,6 +7,7 @@ import { CallInterface } from '@/components/call/CallInterface';
 import { useCallRoom } from '@/hooks/useCallRoom';
 import { useWebRTC } from '@/hooks/useWebRTC';
 import { useAnonymousAuth } from '@/hooks/useAnonymousAuth';
+import { useCameraPreload } from '@/hooks/useCameraPreload';
 import { UserRole, GestureMessage } from '@/types/call';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
@@ -22,6 +23,13 @@ export default function VideoCall() {
 
   const { user, isLoading: isAuthLoading, ensureAuthenticated } = useAnonymousAuth();
   const { room, isLoading, error, createRoom, joinRoom, leaveRoom } = useCallRoom();
+  const { 
+    stream: preloadedStream, 
+    isReady: isCameraReady, 
+    isLoading: isCameraLoading, 
+    preload: preloadCamera,
+    release: releaseCamera 
+  } = useCameraPreload();
 
   const handleGestureReceived = useCallback((message: GestureMessage) => {
     setReceivedGestures(prev => [...prev, message]);
@@ -94,13 +102,24 @@ export default function VideoCall() {
     }
   };
 
-  // Handle start call
+  // Handle start call - use preloaded stream if available for instant start
   const handleStartCall = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      });
+      const startTime = performance.now();
+      console.log('[VideoCall] Starting call...');
+
+      // Use preloaded stream if available, otherwise request new one
+      let stream = preloadedStream;
+      
+      if (!stream) {
+        console.log('[VideoCall] No preloaded stream, requesting media...');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+      } else {
+        console.log('[VideoCall] Using preloaded stream for instant start!');
+      }
 
       // Host (room creator) is the offerer. Joiner must NOT create an offer (prevents glare).
       if (room?.created_by === user?.id) {
@@ -108,6 +127,9 @@ export default function VideoCall() {
       } else {
         await joinCall(stream);
       }
+
+      const elapsed = performance.now() - startTime;
+      console.log(`[VideoCall] Call started in ${elapsed.toFixed(0)}ms`);
 
       setPhase('in-call');
     } catch (err) {
@@ -120,6 +142,7 @@ export default function VideoCall() {
   const handleEndCall = () => {
     endCall();
     leaveRoom(user?.id);
+    releaseCamera(); // Release preloaded camera
     setPhase('role-selection');
     setRole(null);
     setReceivedGestures([]);
@@ -185,6 +208,10 @@ export default function VideoCall() {
             onCreateRoom={handleCreateRoom}
             onJoinRoom={handleJoinRoom}
             onStartCall={handleStartCall}
+            cameraStream={preloadedStream}
+            isCameraReady={isCameraReady}
+            isCameraLoading={isCameraLoading}
+            onPreloadCamera={preloadCamera}
           />
         )}
 

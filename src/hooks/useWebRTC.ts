@@ -3,10 +3,16 @@ import { supabase } from '@/integrations/supabase/client';
 import { CallState, GestureMessage } from '@/types/call';
 import { RateLimiter } from '@/lib/throttle';
 
+// Fast STUN servers with low latency - ordered by typical response time
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
 ];
+
+// Shorter timeout for faster failure detection
+const CONNECTION_TIMEOUT_MS = 15000;
 
 interface UseWebRTCOptions {
   roomId: string;
@@ -76,10 +82,13 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     }
   }, [roomId, participantId]);
 
-  // Create peer connection
+  // Create peer connection with optimized settings
   const createPeerConnection = useCallback(() => {
-    console.log('[WebRTC] Creating peer connection');
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    console.log('[WebRTC] Creating peer connection with optimized ICE config');
+    const pc = new RTCPeerConnection({
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 10, // Pre-gather ICE candidates for faster connection
+    });
 
     pc.onicecandidate = async (event) => {
       if (event.candidate) {
@@ -423,7 +432,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
         status: 'error',
         error: 'Connection timed out. Check the room code and try again.',
       }));
-    }, 25000);
+    }, CONNECTION_TIMEOUT_MS); // Use the faster timeout
 
     return () => {
       if (connectTimeoutRef.current) {

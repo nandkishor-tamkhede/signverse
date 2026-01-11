@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Copy, ArrowLeft, Users, Plus, LogIn, Check, Video } from 'lucide-react';
+import { Copy, ArrowLeft, Users, Plus, LogIn, Check, Video, Camera, Loader2 } from 'lucide-react';
 import { UserRole, CallRoom } from '@/types/call';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +15,11 @@ interface RoomLobbyProps {
   onCreateRoom: () => Promise<void>;
   onJoinRoom: (code: string) => Promise<void>;
   onStartCall: () => void;
+  // New props for camera preloading
+  cameraStream?: MediaStream | null;
+  isCameraReady?: boolean;
+  isCameraLoading?: boolean;
+  onPreloadCamera?: () => void;
 }
 
 export function RoomLobby({
@@ -26,10 +31,22 @@ export function RoomLobby({
   onCreateRoom,
   onJoinRoom,
   onStartCall,
+  cameraStream,
+  isCameraReady = false,
+  isCameraLoading = false,
+  onPreloadCamera,
 }: RoomLobbyProps) {
   const [roomCode, setRoomCode] = useState('');
   const [mode, setMode] = useState<'select' | 'create' | 'join'>('select');
   const [copied, setCopied] = useState(false);
+
+  // Preload camera when entering lobby
+  useEffect(() => {
+    if (onPreloadCamera && !isCameraReady && !isCameraLoading) {
+      console.log('[RoomLobby] Preloading camera...');
+      onPreloadCamera();
+    }
+  }, [onPreloadCamera, isCameraReady, isCameraLoading]);
 
   const copyRoomCode = () => {
     if (room) {
@@ -106,15 +123,62 @@ export function RoomLobby({
                 {role === 'signer' ? 'Sign Language User' : 'AI Voice Listener'}
               </div>
 
+              {/* Camera preview (if preloaded) */}
+              {cameraStream && (
+                <div className="bg-muted/50 rounded-xl overflow-hidden aspect-video mb-4">
+                  <video
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover scale-x-[-1]"
+                    ref={(el) => {
+                      if (el && cameraStream) {
+                        el.srcObject = cameraStream;
+                      }
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Camera status */}
+              <div className="flex items-center justify-center gap-2 mb-4">
+                {isCameraLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">Preparing camera...</span>
+                  </>
+                ) : isCameraReady ? (
+                  <>
+                    <Camera className="w-4 h-4 text-green-500" />
+                    <span className="text-sm text-green-500">Camera ready</span>
+                  </>
+                ) : (
+                  <>
+                    <Camera className="w-4 h-4 text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">Camera will start when you join</span>
+                  </>
+                )}
+              </div>
+
               {/* Actions */}
-              <div className="space-y-3 pt-4">
+              <div className="space-y-3">
                 <Button
                   onClick={onStartCall}
                   size="lg"
                   className="w-full h-14 text-lg rounded-xl"
+                  disabled={isCameraLoading}
                 >
-                  <Video className="w-5 h-5 mr-2" />
-                  Start Video Call
+                  {isCameraLoading ? (
+                    <>
+                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                      Preparing...
+                    </>
+                  ) : (
+                    <>
+                      <Video className="w-5 h-5 mr-2" />
+                      {isCameraReady ? 'Start Video Call' : 'Start Call'}
+                    </>
+                  )}
                 </Button>
 
                 <Button
