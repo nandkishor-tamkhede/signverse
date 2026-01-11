@@ -21,67 +21,86 @@ export default function VideoCall() {
   const [receivedGestures, setReceivedGestures] = useState<GestureMessage[]>([]);
   const [receivedText, setReceivedText] = useState<string[]>([]);
 
-  const { user, isLoading: isAuthLoading, ensureAuthenticated } = useAnonymousAuth();
+  const { isLoading: isAuthLoading, ensureAuthenticated } = useAnonymousAuth();
+  const [authUserId, setAuthUserId] = useState<string>('');
+  const [isEnsuringAuth, setIsEnsuringAuth] = useState(true);
+
   const { room, isLoading, error, createRoom, joinRoom, leaveRoom } = useCallRoom();
-  const { 
-    stream: preloadedStream, 
-    isReady: isCameraReady, 
-    isLoading: isCameraLoading, 
+  const {
+    stream: preloadedStream,
+    isReady: isCameraReady,
+    isLoading: isCameraLoading,
     preload: preloadCamera,
-    release: releaseCamera 
+    release: releaseCamera,
   } = useCameraPreload();
 
   const handleGestureReceived = useCallback((message: GestureMessage) => {
-    setReceivedGestures(prev => [...prev, message]);
+    setReceivedGestures((prev) => [...prev, message]);
   }, []);
 
   const handleTextReceived = useCallback((text: string) => {
-    setReceivedText(prev => [...prev, text]);
+    setReceivedText((prev) => [...prev, text]);
   }, []);
 
-  const {
-    callState,
-    isRemoteConnected,
-    startCall,
-    joinCall,
-    endCall,
-    sendGesture,
-    sendText,
-    participantId,
-  } = useWebRTC({
-    roomId: room?.id || '',
-    userId: user?.id || '',
-    onGestureReceived: handleGestureReceived,
-    onTextReceived: handleTextReceived,
-  });
+  const { callState, isRemoteConnected, startCall, joinCall, endCall, sendGesture, sendText, participantId } =
+    useWebRTC({
+      roomId: room?.id || '',
+      userId: authUserId,
+      onGestureReceived: handleGestureReceived,
+      onTextReceived: handleTextReceived,
+    });
+
+  const requireAuthUserId = useCallback(async () => {
+    if (authUserId) return authUserId;
+
+    setIsEnsuringAuth(true);
+    const authenticatedUser = await ensureAuthenticated();
+    setIsEnsuringAuth(false);
+
+    if (!authenticatedUser?.id) return '';
+    setAuthUserId(authenticatedUser.id);
+    return authenticatedUser.id;
+  }, [authUserId, ensureAuthenticated]);
 
   // Ensure user is authenticated when entering the call flow
   useEffect(() => {
-    ensureAuthenticated();
+    let cancelled = false;
+
+    (async () => {
+      setIsEnsuringAuth(true);
+      const authenticatedUser = await ensureAuthenticated();
+      if (!cancelled) {
+        if (authenticatedUser?.id) setAuthUserId(authenticatedUser.id);
+        setIsEnsuringAuth(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [ensureAuthenticated]);
 
   // Handle role selection
   const handleSelectRole = async (selectedRole: UserRole) => {
-    // Ensure authenticated before proceeding
-    const authenticatedUser = await ensureAuthenticated();
-    if (!authenticatedUser) {
+    const uid = await requireAuthUserId();
+    if (!uid) {
       toast.error('Failed to authenticate. Please try again.');
       return;
     }
+
     setRole(selectedRole);
     setPhase('lobby');
   };
 
   // Handle create room
   const handleCreateRoom = async () => {
-    if (!user?.id) {
-      const authenticatedUser = await ensureAuthenticated();
-      if (!authenticatedUser) {
-        toast.error('Authentication required');
-        return;
-      }
+    const uid = await requireAuthUserId();
+    if (!uid) {
+      toast.error('Authentication required');
+      return;
     }
-    const result = await createRoom(user?.id || '');
+
+    const result = await createRoom(uid);
     if (!result) {
       toast.error(error || 'Failed to create room');
     }
@@ -89,14 +108,13 @@ export default function VideoCall() {
 
   // Handle join room
   const handleJoinRoom = async (code: string) => {
-    if (!user?.id) {
-      const authenticatedUser = await ensureAuthenticated();
-      if (!authenticatedUser) {
-        toast.error('Authentication required');
-        return;
-      }
+    const uid = await requireAuthUserId();
+    if (!uid) {
+      toast.error('Authentication required');
+      return;
     }
-    const joinedRoom = await joinRoom(code, user?.id || '');
+
+    const joinedRoom = await joinRoom(code, uid);
     if (!joinedRoom) {
       toast.error(error || 'Failed to join room');
     }
@@ -105,12 +123,24 @@ export default function VideoCall() {
   // Handle start call - use preloaded stream if available for instant start
   const handleStartCall = async () => {
     try {
+      const uid = await requireAuthUserId();
+      if (!uid) {
+        toast.error('Authentication required');
+        return;
+      }
+
+      if (!room?.id) {
+        toast.error('Room not ready. Please try again.');
+        return;
+      }
+
       const startTime = performance.now();
       console.log('[VideoCall] Starting call...');
+      console.log('[VideoCall] roomId:', room.id, 'participantId:', participantId);
 
       // Use preloaded stream if available, otherwise request new one
       let stream = preloadedStream;
-      
+
       if (!stream) {
         console.log('[VideoCall] No preloaded stream, requesting media...');
         stream = await navigator.mediaDevices.getUserMedia({
@@ -121,8 +151,8 @@ export default function VideoCall() {
         console.log('[VideoCall] Using preloaded stream for instant start!');
       }
 
-      // Host (room creator) is the offerer. Joiner must NOT create an offer (prevents glare).
-      if (room?.created_by === user?.id) {
+      // Prefer room creator as initiator. If that ever mismatches, useWebRTC has glare handling + fallback.
+      if (room.created_by === uid) {
         await startCall(stream);
       } else {
         await joinCall(stream);
@@ -139,9 +169,14 @@ export default function VideoCall() {
   };
 
   // Handle end call
-  const handleEndCall = () => {
+  const handleEndCall = async () => {
     endCall();
-    leaveRoom(user?.id);
+
+    const uid = authUserId;
+    if (uid) {
+      leaveRoom(uid);
+    }
+
     releaseCamera(); // Release preloaded camera
     setPhase('role-selection');
     setRole(null);
@@ -153,21 +188,29 @@ export default function VideoCall() {
   // Handle back navigation
   const handleBack = () => {
     if (phase === 'lobby') {
-      leaveRoom(user?.id);
+      if (authUserId) {
+        leaveRoom(authUserId);
+      }
       setPhase('role-selection');
       setRole(null);
     }
   };
 
   // Handle send gesture
-  const handleSendGesture = useCallback((message: GestureMessage) => {
-    sendGesture(message);
-  }, [sendGesture]);
+  const handleSendGesture = useCallback(
+    (message: GestureMessage) => {
+      sendGesture(message);
+    },
+    [sendGesture]
+  );
 
   // Handle send text
-  const handleSendText = useCallback((text: string) => {
-    sendText(text);
-  }, [sendText]);
+  const handleSendText = useCallback(
+    (text: string) => {
+      sendText(text);
+    },
+    [sendText]
+  );
 
   // Apply dark mode
   useEffect(() => {
@@ -175,7 +218,7 @@ export default function VideoCall() {
   }, []);
 
   // Show loading while authenticating
-  if (isAuthLoading) {
+  if (isAuthLoading || isEnsuringAuth) {
     return (
       <div className="min-h-screen relative">
         <AnimatedBackground />
@@ -192,11 +235,9 @@ export default function VideoCall() {
   return (
     <div className="min-h-screen relative">
       <AnimatedBackground />
-      
+
       <div className="relative z-10">
-        {phase === 'role-selection' && (
-          <RoleSelection onSelectRole={handleSelectRole} />
-        )}
+        {phase === 'role-selection' && <RoleSelection onSelectRole={handleSelectRole} />}
 
         {phase === 'lobby' && role && (
           <RoomLobby
