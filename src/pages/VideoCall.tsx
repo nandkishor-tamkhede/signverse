@@ -6,8 +6,10 @@ import { RoomLobby } from '@/components/call/RoomLobby';
 import { CallInterface } from '@/components/call/CallInterface';
 import { useCallRoom } from '@/hooks/useCallRoom';
 import { useWebRTC } from '@/hooks/useWebRTC';
+import { useAnonymousAuth } from '@/hooks/useAnonymousAuth';
 import { UserRole, GestureMessage } from '@/types/call';
 import { toast } from 'sonner';
+import { Loader2 } from 'lucide-react';
 
 type CallPhase = 'role-selection' | 'lobby' | 'in-call';
 
@@ -18,6 +20,7 @@ export default function VideoCall() {
   const [receivedGestures, setReceivedGestures] = useState<GestureMessage[]>([]);
   const [receivedText, setReceivedText] = useState<string[]>([]);
 
+  const { user, isLoading: isAuthLoading, ensureAuthenticated } = useAnonymousAuth();
   const { room, isLoading, error, createRoom, joinRoom, leaveRoom } = useCallRoom();
 
   const handleGestureReceived = useCallback((message: GestureMessage) => {
@@ -39,26 +42,48 @@ export default function VideoCall() {
     participantId,
   } = useWebRTC({
     roomId: room?.id || '',
+    userId: user?.id || '',
     onGestureReceived: handleGestureReceived,
     onTextReceived: handleTextReceived,
   });
 
+  // Ensure user is authenticated when entering the call flow
+  useEffect(() => {
+    ensureAuthenticated();
+  }, [ensureAuthenticated]);
+
   // Handle role selection
-  const handleSelectRole = (selectedRole: UserRole) => {
+  const handleSelectRole = async (selectedRole: UserRole) => {
+    // Ensure authenticated before proceeding
+    const authenticatedUser = await ensureAuthenticated();
+    if (!authenticatedUser) {
+      toast.error('Failed to authenticate. Please try again.');
+      return;
+    }
     setRole(selectedRole);
     setPhase('lobby');
   };
 
   // Handle create room
   const handleCreateRoom = async () => {
-    await createRoom(participantId);
+    if (!user?.id) {
+      const authenticatedUser = await ensureAuthenticated();
+      if (!authenticatedUser) {
+        toast.error('Authentication required');
+        return;
+      }
+    }
+    const result = await createRoom(user?.id || '');
+    if (!result) {
+      toast.error(error || 'Failed to create room');
+    }
   };
 
   // Handle join room
   const handleJoinRoom = async (code: string) => {
     const joinedRoom = await joinRoom(code);
     if (!joinedRoom) {
-      toast.error('Failed to join room');
+      toast.error(error || 'Failed to join room');
     }
   };
 
@@ -71,7 +96,7 @@ export default function VideoCall() {
       });
 
       // Check if this is the first participant (creator) or second (joiner)
-      if (room?.created_by === participantId) {
+      if (room?.created_by === user?.id) {
         await startCall(stream);
       } else {
         await joinCall(stream);
@@ -122,6 +147,21 @@ export default function VideoCall() {
   useEffect(() => {
     document.documentElement.classList.remove('light');
   }, []);
+
+  // Show loading while authenticating
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen relative">
+        <AnimatedBackground />
+        <div className="relative z-10 flex items-center justify-center min-h-screen">
+          <div className="flex flex-col items-center gap-4">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-muted-foreground">Preparing secure connection...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen relative">
