@@ -1,38 +1,64 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, GraduationCap, Loader2, RefreshCw } from 'lucide-react';
+import { ArrowLeft, GraduationCap, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AnimatedBackground } from '@/components/AnimatedBackground';
-import { LevelCard } from '@/components/learning/LevelCard';
-import { LevelDetail } from '@/components/learning/LevelDetail';
-import { PracticeMode } from '@/components/learning/PracticeMode';
-import { ProgressOverview } from '@/components/learning/ProgressOverview';
-import { LEARNING_LEVELS } from '@/lib/learningData';
-import { useLearningProgress } from '@/hooks/useLearningProgress';
+import { CategoryCard } from '@/components/learning/CategoryCard';
+import { CategoryBrowser } from '@/components/learning/CategoryBrowser';
+import { SignViewer } from '@/components/learning/SignViewer';
+import { BeginnerPracticeMode } from '@/components/learning/BeginnerPracticeMode';
+import { LearningProgressOverview } from '@/components/learning/LearningProgressOverview';
+import { LEARNING_CATEGORIES, LearningCategory } from '@/lib/learningCategories';
 import { useMediaPipeHands } from '@/hooks/useMediaPipeHands';
-import { LearningLevel, LessonGesture } from '@/types/learning';
 import { GestureClassificationResult } from '@/types/gesture';
 import { useAnonymousAuth } from '@/hooks/useAnonymousAuth';
+import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 
+type ViewState = 'categories' | 'browse' | 'learn' | 'practice';
+
 const Learn = () => {
-  const [selectedLevel, setSelectedLevel] = useState<LearningLevel | null>(null);
-  const [selectedGesture, setSelectedGesture] = useState<LessonGesture | null>(null);
+  const [viewState, setViewState] = useState<ViewState>('categories');
+  const [selectedCategory, setSelectedCategory] = useState<LearningCategory | null>(null);
+  const [currentGestureIndex, setCurrentGestureIndex] = useState(0);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [detectedGesture, setDetectedGesture] = useState<GestureClassificationResult | null>(null);
-  const [isUpdating, setIsUpdating] = useState(false);
+  const [completedGestures, setCompletedGestures] = useState<Set<string>>(new Set());
+  const [isLoading, setIsLoading] = useState(true);
 
-  const { isAuthenticated, isLoading: authLoading } = useAnonymousAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAnonymousAuth();
 
-  const { 
-    getLevelProgress, 
-    getGestureProgress, 
-    getTotalProgress, 
-    updateGestureProgress,
-    loadProgress,
-    isLoading: progressLoading 
-  } = useLearningProgress();
+  // Load completed gestures from database
+  useEffect(() => {
+    const loadProgress = async () => {
+      if (!user?.id) {
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('user_learning_progress')
+          .select('gesture_id')
+          .eq('user_id', user.id)
+          .eq('completed', true);
+
+        if (error) throw error;
+
+        const completed = new Set(data?.map(d => d.gesture_id) || []);
+        setCompletedGestures(completed);
+      } catch (error) {
+        console.error('Failed to load progress:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    if (isAuthenticated) {
+      loadProgress();
+    }
+  }, [user?.id, isAuthenticated]);
 
   const handleGestureDetected = useCallback((result: GestureClassificationResult) => {
     setDetectedGesture(result);
@@ -43,45 +69,113 @@ const Learn = () => {
     isActive: isCameraActive,
   });
 
-  const totalProgress = getTotalProgress();
-  const levelsCompleted = LEARNING_LEVELS.filter(level => {
-    const progress = getLevelProgress(level.id);
-    return progress?.gesturesCompleted === progress?.totalGestures && progress?.totalGestures > 0;
-  }).length;
+  // Handlers
+  const handleSelectCategory = (category: LearningCategory) => {
+    setSelectedCategory(category);
+    setViewState('browse');
+  };
 
-  const handlePracticeComplete = useCallback(async (accuracy: number, passed: boolean) => {
-    if (selectedLevel && selectedGesture) {
-      setIsUpdating(true);
-      try {
-        await updateGestureProgress(selectedLevel.id, selectedGesture.id, accuracy, passed);
-        if (passed) {
-          toast.success('Great job! Progress saved 🎉');
-        }
-      } catch (error) {
-        console.error('Failed to save progress:', error);
-        toast.error('Could not save progress. Please try again.');
-      } finally {
-        setIsUpdating(false);
-      }
-    }
-  }, [selectedLevel, selectedGesture, updateGestureProgress]);
+  const handleSelectGesture = (index: number) => {
+    setCurrentGestureIndex(index);
+    setViewState('learn');
+  };
 
-  const handleClosePractice = useCallback(() => {
-    setSelectedGesture(null);
+  const handleStartPractice = () => {
+    setViewState('practice');
+    setIsCameraActive(true);
+  };
+
+  const handleClosePractice = () => {
+    setViewState('learn');
     setIsCameraActive(false);
-  }, []);
+  };
 
-  const handleRefresh = useCallback(async () => {
+  const handlePracticeComplete = async (accuracy: number, passed: boolean) => {
+    if (!selectedCategory || !user?.id) return;
+
+    const gesture = selectedCategory.gestures[currentGestureIndex];
+    
     try {
-      await loadProgress();
+      // Upsert progress to database
+      const { error } = await supabase
+        .from('user_learning_progress')
+        .upsert({
+          user_id: user.id,
+          level_id: LEARNING_CATEGORIES.findIndex(c => c.id === selectedCategory.id) + 1,
+          gesture_id: gesture.name,
+          accuracy_score: accuracy,
+          best_accuracy: accuracy,
+          completed: passed,
+          attempts: 1,
+          last_practiced_at: new Date().toISOString(),
+        }, {
+          onConflict: 'user_id,level_id,gesture_id'
+        });
+
+      if (error) throw error;
+
+      if (passed) {
+        setCompletedGestures(prev => new Set([...prev, gesture.name]));
+        toast.success('Great job! Progress saved 🎉');
+      }
+    } catch (error) {
+      console.error('Failed to save progress:', error);
+    }
+  };
+
+  const handleNextGesture = () => {
+    if (selectedCategory && currentGestureIndex < selectedCategory.gestures.length - 1) {
+      setCurrentGestureIndex(prev => prev + 1);
+    }
+  };
+
+  const handlePreviousGesture = () => {
+    if (currentGestureIndex > 0) {
+      setCurrentGestureIndex(prev => prev - 1);
+    }
+  };
+
+  const handleBackFromLearn = () => {
+    setViewState('browse');
+  };
+
+  const handleBackFromBrowse = () => {
+    setSelectedCategory(null);
+    setViewState('categories');
+  };
+
+  const getCompletionStatus = (gestureName: string) => {
+    return completedGestures.has(gestureName);
+  };
+
+  const getCategoryCompletedCount = (category: LearningCategory) => {
+    return category.gestures.filter(g => completedGestures.has(g.name)).length;
+  };
+
+  const handleRefresh = async () => {
+    if (!user?.id) return;
+    setIsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('user_learning_progress')
+        .select('gesture_id')
+        .eq('user_id', user.id)
+        .eq('completed', true);
+
+      if (error) throw error;
+
+      const completed = new Set(data?.map(d => d.gesture_id) || []);
+      setCompletedGestures(completed);
       toast.success('Progress refreshed');
     } catch {
-      toast.error('Failed to refresh progress');
+      toast.error('Failed to refresh');
+    } finally {
+      setIsLoading(false);
     }
-  }, [loadProgress]);
+  };
 
-  // Show loading state
-  if (authLoading || progressLoading) {
+  // Loading state
+  if (authLoading || isLoading) {
     return (
       <div className="min-h-screen relative">
         <AnimatedBackground />
@@ -104,91 +198,116 @@ const Learn = () => {
       <AnimatedBackground />
       
       <div className="relative z-10 container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <Link to="/">
-              <Button variant="ghost" size="icon">
-                <ArrowLeft className="w-5 h-5" />
+        {/* Header - only show on main views */}
+        {viewState === 'categories' && (
+          <>
+            <div className="flex items-center justify-between mb-8">
+              <div className="flex items-center gap-4">
+                <Link to="/">
+                  <Button variant="ghost" size="icon">
+                    <ArrowLeft className="w-5 h-5" />
+                  </Button>
+                </Link>
+                <div className="flex items-center gap-4">
+                  <div className="p-4 rounded-2xl bg-gradient-to-br from-primary via-purple-500 to-pink-500">
+                    <GraduationCap className="w-10 h-10 text-white" />
+                  </div>
+                  <div>
+                    <h1 className="text-3xl sm:text-4xl font-bold">Learn Sign Language</h1>
+                    <p className="text-muted-foreground flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-yellow-500" />
+                      Easy, visual, and beginner-friendly
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                onClick={handleRefresh}
+                disabled={isLoading}
+              >
+                <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
               </Button>
-            </Link>
-            <div className="flex items-center gap-3">
-              <div className="p-3 rounded-xl bg-gradient-to-br from-primary to-secondary">
-                <GraduationCap className="w-8 h-8 text-white" />
-              </div>
-              <div>
-                <h1 className="text-3xl font-bold">Learn Sign Language</h1>
-                <p className="text-muted-foreground">AI-powered interactive lessons</p>
-              </div>
             </div>
-          </div>
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            onClick={handleRefresh}
-            disabled={progressLoading}
-          >
-            <RefreshCw className={`w-5 h-5 ${progressLoading ? 'animate-spin' : ''}`} />
-          </Button>
-        </div>
 
-        {/* Progress Overview */}
-        <ProgressOverview
-          totalCompleted={totalProgress.completed}
-          totalGestures={totalProgress.total}
-          percentage={totalProgress.percentage}
-          levelsCompleted={levelsCompleted}
-          totalLevels={LEARNING_LEVELS.length}
-        />
+            {/* Progress Overview */}
+            <LearningProgressOverview completedGestures={completedGestures} />
+          </>
+        )}
 
         {/* Content */}
         <AnimatePresence mode="wait">
-          {!selectedLevel ? (
+          {viewState === 'categories' && (
             <motion.div
-              key="levels"
+              key="categories"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="grid md:grid-cols-2 gap-6"
             >
-              {LEARNING_LEVELS.map((level) => {
-                const progress = getLevelProgress(level.id);
-                return (
-                  <LevelCard
-                    key={level.id}
-                    level={level}
-                    isUnlocked={progress?.isUnlocked ?? level.id === 1}
-                    gesturesCompleted={progress?.gesturesCompleted ?? 0}
-                    totalGestures={level.gestures.length}
-                    isCompleted={progress?.completedAt !== null}
-                    onClick={() => setSelectedLevel(level)}
+              {/* Welcome message for beginners */}
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-center mb-10"
+              >
+                <h2 className="text-2xl font-semibold mb-2">Choose a category to start learning</h2>
+                <p className="text-muted-foreground">
+                  Each category contains visual signs with step-by-step guidance
+                </p>
+              </motion.div>
+
+              {/* Category grid */}
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {LEARNING_CATEGORIES.map((category, index) => (
+                  <CategoryCard
+                    key={category.id}
+                    category={category}
+                    completedCount={getCategoryCompletedCount(category)}
+                    onClick={() => handleSelectCategory(category)}
+                    index={index}
                   />
-                );
-              })}
+                ))}
+              </div>
             </motion.div>
-          ) : (
-            <LevelDetail
-              key="detail"
-              level={selectedLevel}
-              getGestureProgress={(levelId, gestureId) => {
-                const progress = getGestureProgress(levelId, gestureId);
-                return progress ? {
-                  completed: progress.completed,
-                  bestAccuracy: progress.bestAccuracy,
-                  attempts: progress.attempts,
-                } : undefined;
-              }}
-              onSelectGesture={setSelectedGesture}
-              onBack={() => setSelectedLevel(null)}
+          )}
+
+          {viewState === 'browse' && selectedCategory && (
+            <CategoryBrowser
+              key="browse"
+              category={selectedCategory}
+              onBack={handleBackFromBrowse}
+              onSelectGesture={handleSelectGesture}
+              getCompletionStatus={getCompletionStatus}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Sign Viewer */}
+        <AnimatePresence>
+          {viewState === 'learn' && selectedCategory && (
+            <SignViewer
+              category={selectedCategory}
+              currentIndex={currentGestureIndex}
+              isCompleted={getCompletionStatus(selectedCategory.gestures[currentGestureIndex]?.name)}
+              onNext={handleNextGesture}
+              onPrevious={handlePreviousGesture}
+              onClose={handleBackFromLearn}
+              onPractice={handleStartPractice}
+              totalGestures={selectedCategory.gestures.length}
+              getCompletionStatus={(index) => 
+                getCompletionStatus(selectedCategory.gestures[index]?.name)
+              }
             />
           )}
         </AnimatePresence>
 
         {/* Practice Mode */}
         <AnimatePresence>
-          {selectedGesture && selectedLevel && (
-            <PracticeMode
-              gesture={selectedGesture}
+          {viewState === 'practice' && selectedCategory && (
+            <BeginnerPracticeMode
+              gesture={selectedCategory.gestures[currentGestureIndex]}
+              category={selectedCategory}
               videoRef={videoRef}
               canvasRef={canvasRef}
               isActive={isCameraActive}
@@ -197,7 +316,7 @@ const Learn = () => {
               onClose={handleClosePractice}
               onComplete={handlePracticeComplete}
               onToggleCamera={() => setIsCameraActive(true)}
-              requiredAccuracy={selectedLevel.requiredAccuracy}
+              requiredAccuracy={50}
             />
           )}
         </AnimatePresence>
