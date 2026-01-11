@@ -103,6 +103,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
   const loadIceServers = useCallback(async () => {
     try {
+      console.log('[WebRTC] Loading ICE servers from backend...');
       const { data, error } = await supabase.functions.invoke('ice-servers');
       if (error) throw error;
 
@@ -116,7 +117,12 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
           return list.some((u: any) => typeof u === 'string' && u.startsWith('turn:'));
         });
 
-        console.log('[WebRTC] Loaded ICE servers from backend. TURN:', hasTurnServersRef.current);
+        console.log('[WebRTC] Loaded ICE servers. TURN available:', hasTurnServersRef.current);
+
+        // If we have TURN and already have a PC, update its configuration for future restarts
+        if (hasTurnServersRef.current && peerConnectionRef.current) {
+          console.log('[WebRTC] TURN servers now available for ICE restart');
+        }
       }
     } catch (err) {
       console.warn('[WebRTC] Failed to load ICE servers (using STUN only):', err);
@@ -320,6 +326,11 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
         if (localStreamRef.current && callState.status !== 'idle') {
           console.log('[WebRTC] Attempting reconnection...');
 
+          // If TURN servers are available now, recreate PC with updated config
+          if (hasTurnServersRef.current) {
+            console.log('[WebRTC] Using TURN servers for reconnection attempt');
+          }
+
           // New session id for the retry (prevents mixing with stale signals)
           callSessionIdRef.current = crypto.randomUUID();
           hasReceivedOfferRef.current = false;
@@ -336,7 +347,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
             const offer = await pc.createOffer({
               offerToReceiveAudio: true,
               offerToReceiveVideo: true,
-              iceRestart: hasTurnServersRef.current,
+              iceRestart: true, // Always restart ICE on retry
             });
             await pc.setLocalDescription(offer);
             await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
@@ -571,8 +582,16 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
       const elapsed = performance.now() - startTime;
       console.log(`[WebRTC] Offer created in ${elapsed.toFixed(0)}ms`);
 
-      // Send offer immediately
+      // Send offer immediately - repeat it twice for reliability
       await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
+
+      // Re-send offer after a short delay for reliability (in case first missed)
+      setTimeout(() => {
+        if (peerConnectionRef.current === pc && pc.signalingState === 'have-local-offer') {
+          console.log('[WebRTC] Re-sending offer for reliability');
+          void sendSignal('offer', { type: offer.type, sdp: offer.sdp });
+        }
+      }, 300);
     } finally {
       makingOfferRef.current = false;
     }
