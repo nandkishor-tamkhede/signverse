@@ -119,9 +119,22 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     };
 
     pc.ontrack = (event) => {
-      console.log('[WebRTC] Remote track received');
-      const [remoteStream] = event.streams;
-      setCallState((prev) => ({ ...prev, remoteStream }));
+      console.log('[WebRTC] Remote track received:', event.track.kind, 'streams:', event.streams.length);
+      
+      // Get or create remote stream
+      if (event.streams && event.streams[0]) {
+        const remoteStream = event.streams[0];
+        console.log('[WebRTC] Using existing stream with tracks:', remoteStream.getTracks().length);
+        setCallState((prev) => ({ ...prev, remoteStream }));
+      } else {
+        // Fallback: create a new stream if none provided
+        console.log('[WebRTC] Creating new MediaStream for track');
+        setCallState((prev) => {
+          const existingStream = prev.remoteStream || new MediaStream();
+          existingStream.addTrack(event.track);
+          return { ...prev, remoteStream: existingStream };
+        });
+      }
     };
 
     peerConnectionRef.current = pc;
@@ -149,13 +162,18 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
     try {
       switch (signal.signal_type) {
         case 'offer': {
+          console.log('[WebRTC] Processing offer from remote peer');
           const newPc = pc || createPeerConnection();
           
-          // Add local tracks if we have them
+          // Add local tracks BEFORE setting remote description (critical for two-way video!)
           if (localStreamRef.current) {
+            console.log('[WebRTC] Adding local tracks to answer peer connection');
             localStreamRef.current.getTracks().forEach(track => {
+              console.log('[WebRTC] Adding track for answer:', track.kind);
               newPc.addTrack(track, localStreamRef.current!);
             });
+          } else {
+            console.warn('[WebRTC] No local stream available when processing offer!');
           }
 
           const offerData = signal.signal_data as { type: RTCSdpType; sdp: string };
@@ -163,6 +181,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
             type: offerData.type,
             sdp: offerData.sdp,
           }));
+          console.log('[WebRTC] Set remote description (offer)');
           
           // Process pending candidates
           for (const candidate of pendingCandidatesRef.current) {
@@ -172,6 +191,7 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
           const answer = await newPc.createAnswer();
           await newPc.setLocalDescription(answer);
+          console.log('[WebRTC] Created and set local answer');
 
           await sendSignal('answer', { type: answer.type, sdp: answer.sdp });
           break;
@@ -179,17 +199,21 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
 
         case 'answer': {
           if (pc && pc.signalingState === 'have-local-offer') {
+            console.log('[WebRTC] Processing answer from remote peer');
             const answerData = signal.signal_data as { type: RTCSdpType; sdp: string };
             await pc.setRemoteDescription(new RTCSessionDescription({
               type: answerData.type,
               sdp: answerData.sdp,
             }));
+            console.log('[WebRTC] Set remote description (answer)');
             
             // Process pending candidates
             for (const candidate of pendingCandidatesRef.current) {
               await pc.addIceCandidate(new RTCIceCandidate(candidate));
             }
             pendingCandidatesRef.current = [];
+          } else {
+            console.warn('[WebRTC] Received answer but not in correct state:', pc?.signalingState);
           }
           break;
         }
@@ -240,19 +264,26 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   // Start call as initiator
   const startCall = useCallback(async (localStream: MediaStream) => {
     console.log('[WebRTC] Starting call as initiator');
+    console.log('[WebRTC] Local stream tracks:', localStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
+    
     setCallState({ status: 'connecting', localStream });
     localStreamRef.current = localStream;
 
     const pc = createPeerConnection();
 
-    // Add local tracks
+    // Add local tracks BEFORE creating offer (critical!)
     localStream.getTracks().forEach(track => {
+      console.log('[WebRTC] Adding track to peer connection:', track.kind);
       pc.addTrack(track, localStream);
     });
 
-    // Create and send offer
-    const offer = await pc.createOffer();
+    // Create and send offer with proper options
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true,
+    });
     await pc.setLocalDescription(offer);
+    console.log('[WebRTC] Created and set local offer');
 
     await sendSignal('offer', { type: offer.type, sdp: offer.sdp });
   }, [createPeerConnection, sendSignal]);
@@ -260,8 +291,13 @@ export function useWebRTC({ roomId, userId, onGestureReceived, onTextReceived }:
   // Join call as responder
   const joinCall = useCallback(async (localStream: MediaStream) => {
     console.log('[WebRTC] Joining call as responder');
+    console.log('[WebRTC] Local stream tracks:', localStream.getTracks().map(t => `${t.kind}:${t.enabled}`));
+    
     setCallState({ status: 'connecting', localStream });
     localStreamRef.current = localStream;
+    
+    // Note: We don't create offer here - we wait for the host's offer
+    // The handleSignal function will create the peer connection and answer when offer arrives
   }, []);
 
   // Send gesture to remote with rate limiting

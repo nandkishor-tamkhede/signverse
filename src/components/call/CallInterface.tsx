@@ -183,24 +183,40 @@ export function CallInterface({
     }
   }, [receivedGestures, role, speak, aiVoiceEnabled]);
 
-  // Attach streams
+  // Attach local stream to video elements
   useEffect(() => {
-    if (callState.localStream && localVideoRef.current) {
+    if (!callState.localStream) return;
+    
+    console.log('[CallInterface] Attaching local stream, tracks:', callState.localStream.getTracks().length);
+    
+    // For listener role, attach to localVideoRef
+    if (role !== 'signer' && localVideoRef.current) {
       localVideoRef.current.srcObject = callState.localStream;
+      localVideoRef.current.play().catch(err => {
+        console.warn('[CallInterface] Local video play failed:', err);
+      });
     }
-  }, [callState.localStream]);
-
-  useEffect(() => {
-    if (callState.remoteStream && remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = callState.remoteStream;
-    }
-  }, [callState.remoteStream]);
-
-  useEffect(() => {
-    if (role === 'signer' && callState.localStream && gestureVideoRef.current) {
+    
+    // For signer role, attach to gestureVideoRef
+    if (role === 'signer' && gestureVideoRef.current) {
       gestureVideoRef.current.srcObject = callState.localStream;
+      gestureVideoRef.current.play().catch(err => {
+        console.warn('[CallInterface] Gesture video play failed:', err);
+      });
     }
-  }, [role, callState.localStream, gestureVideoRef]);
+  }, [callState.localStream, role, gestureVideoRef]);
+
+  // Attach remote stream to video element
+  useEffect(() => {
+    if (!callState.remoteStream || !remoteVideoRef.current) return;
+    
+    console.log('[CallInterface] Attaching remote stream, tracks:', callState.remoteStream.getTracks().length);
+    
+    remoteVideoRef.current.srcObject = callState.remoteStream;
+    remoteVideoRef.current.play().catch(err => {
+      console.warn('[CallInterface] Remote video play failed:', err);
+    });
+  }, [callState.remoteStream]);
 
   // Toggle handlers
   const toggleMute = () => {
